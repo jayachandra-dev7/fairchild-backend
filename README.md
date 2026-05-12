@@ -54,6 +54,8 @@ uvicorn app.main:app --reload
 - `POST /api/v1/impact/authorize`
 - `GET /api/v1/impact/campaigns`
 - `GET /api/v1/impact/campaigns/{campaign_id}`
+- `GET /api/v1/impact/campaigns/{campaign_id}/deals`
+- `GET /api/v1/impact/campaigns/{campaign_id}/deals/{deal_id}`
 - `GET /api/v1/impact/catalogs`
 - `GET /api/v1/impact/catalogs/{catalog_id}/items`
 - `GET /api/v1/impact/catalogs/item-search`
@@ -61,8 +63,19 @@ uvicorn app.main:app --reload
 - `POST /api/v1/impact/programs/{program_id}/tracking-links`
 - `GET /api/v1/wordpress/health`
 - `POST /api/v1/wordpress/authorize`
+- `POST /api/v1/wordpress/media/upload`
+- `POST /api/v1/wordpress/products`
 - `GET /api/v1/metricool/health`
 - `POST /api/v1/metricool/authorize`
+- `GET /api/v1/metricool/profiles`
+- `POST /api/v1/metricool/upload`
+- `GET /api/v1/metricool/scheduler/posts`
+- `POST /api/v1/metricool/scheduler/posts`
+- `GET /api/v1/renderform/health`
+- `POST /api/v1/renderform/authorize`
+- `GET /api/v1/renderform/templates`
+- `POST /api/v1/renderform/render`
+- `POST /api/v1/renderform/render/upload`
 
 Next, we can add each platform router from your cURL commands one-by-one.
 
@@ -85,8 +98,12 @@ Next, we can add each platform router from your cURL commands one-by-one.
 ## Impact: Campaigns
 - Backend route: `GET /api/v1/impact/campaigns`
 - Backend route: `GET /api/v1/impact/campaigns/{campaign_id}`
+- Backend route: `GET /api/v1/impact/campaigns/{campaign_id}/deals`
+- Backend route: `GET /api/v1/impact/campaigns/{campaign_id}/deals/{deal_id}`
 - Upstream URL: `https://api.impact.com/Mediapartners/<Account-SID>/Campaigns`
 - Upstream URL: `https://api.impact.com/Mediapartners/<Account-SID>/Campaigns/<ID>`
+- Upstream URL: `https://api.impact.com/Mediapartners/<Account-SID>/Campaigns/<CampaignID>/Deals`
+- Upstream URL: `https://api.impact.com/Mediapartners/<Account-SID>/Campaigns/<CampaignID>/Deals/<ID>`
 - Auth can be stored via `POST /api/v1/impact/authorize`
 - Auth format: Basic Auth using `account_sid` as username and `auth_token` as password
 - If direct Basic Auth is sent on the request, it overrides stored credentials
@@ -104,3 +121,45 @@ Next, we can add each platform router from your cURL commands one-by-one.
 - Backend route: `POST /api/v1/impact/programs/{program_id}/tracking-links`
 - Upstream URL: `https://api.impact.com/Mediapartners/<Account-SID>/Programs/<PROGRAM_ID>/TrackingLinks`
 - Optional body fields: `deeplink`, `shared_id`, `sub_id1`, `sub_id2`, `sub_id3`, `sub_id4`, `media_partner_property_id`
+
+## Metricool
+- Backend route: `POST /api/v1/metricool/authorize`
+- Required body fields: `token`
+- Backend route: `GET /api/v1/metricool/profiles`
+- Upstream URL: `https://app.metricool.com/api/admin/simpleProfiles`
+- Backend route: `POST /api/v1/metricool/upload`
+- Required query params: `userId`, `blogId`
+- Upload field: `picture` as multipart file
+- Upstream URL: `https://app.metricool.com/api/utils/upload?userId=<USER_ID>&blogId=<BLOG_ID>`
+- Backend route: `GET /api/v1/metricool/scheduler/posts`
+- Required query params: `start`, `end`, `userId`, `blogId`
+- Optional query params: `timezone` default `America/Denver`, `extendedRange` default `true`
+- Backend route: `POST /api/v1/metricool/scheduler/posts`
+- Required query params: `userId`, `blogId`
+- Upstream URL: `https://app.metricool.com/api/v2/scheduler/posts?userId=<USER_ID>&blogId=<BLOG_ID>`
+- Header sent upstream: `X-Mc-Auth: <token>`
+
+## WordPress
+- Backend route: `POST /api/v1/wordpress/authorize`
+- Required body fields: `domain`, `wc_consumer_key`, `wc_consumer_secret`
+- Backend route: `POST /api/v1/wordpress/media/upload`
+- Upload field: `file` as multipart form-data
+- Upstream URL: `https://<domain>/wp-json/wp/v2/media`
+- Auth format: Basic Auth using `wc_consumer_key:wc_consumer_secret`
+- Backend route: `POST /api/v1/wordpress/products`
+- Upstream URL: `https://<domain>/wp-json/wc/v3/products`
+- Auth format: Basic Auth using `wc_consumer_key:wc_consumer_secret`
+- Product body supports sample keys: `name`, `type`, `status`, `featured`, `catalog_visibility`, `description`, `short_description`, `external_url`, `button_text`, `regular_price`, `sale_price`, `images`, `meta_data`
+
+## RenderForm
+- Backend route: `POST /api/v1/renderform/authorize`
+- Required body fields: `api_key`
+- Backend route: `GET /api/v1/renderform/templates`
+- Upstream URL: `https://get.renderform.io/api/v2/my-templates`
+- Header sent upstream: `X-API-KEY: <API_KEY>`
+- Backend route: `POST /api/v1/renderform/render`
+- Upstream URL: `https://get.renderform.io/api/v2/render`
+- Sample body fields handled: `template`, `titleText`, `imageSrc` and optional `extraData`
+- Backend route: `POST /api/v1/renderform/render/upload`
+- Upload field: `image` (multipart)
+- The backend converts uploaded image to data URL and sends it as `image.src`

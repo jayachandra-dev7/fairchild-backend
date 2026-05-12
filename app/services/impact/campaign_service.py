@@ -144,3 +144,34 @@ class ImpactCampaignService:
             path=f'/Programs/{program_id}/TrackingLinks',
             data=payload,
         )
+
+    @classmethod
+    async def fetch_deals(
+        cls,
+        *,
+        account_sid: str,
+        auth_token: str,
+        campaign_id: str,
+    ) -> dict[str, Any]:
+        return await cls._request(
+            account_sid=account_sid,
+            auth_token=auth_token,
+            method='GET',
+            path=f'/Campaigns/{campaign_id}/Deals',
+        )
+
+    @classmethod
+    async def fetch_deal_by_id(
+        cls,
+        *,
+        account_sid: str,
+        auth_token: str,
+        campaign_id: str,
+        deal_id: str,
+    ) -> dict[str, Any]:
+        return await cls._request(
+            account_sid=account_sid,
+            auth_token=auth_token,
+            method='GET',
+            path=f'/Campaigns/{campaign_id}/Deals/{deal_id}',
+        )

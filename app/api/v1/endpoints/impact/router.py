@@ -120,6 +120,74 @@ async def get_impact_campaign_by_id(
         ) from exc
 
 
+@router.get('/campaigns/{campaign_id}/deals', response_model=ApiResponse[dict])
+async def get_impact_deals(
+    campaign_id: str,
+    credentials: HTTPBasicCredentials | None = Depends(impact_basic),
+) -> ApiResponse[dict]:
+    account_sid, auth_token = _resolve_impact_credentials(credentials)
+
+    try:
+        payload = await ImpactCampaignService.fetch_deals(
+            account_sid=account_sid,
+            auth_token=auth_token,
+            campaign_id=campaign_id,
+        )
+        return ApiResponse(data=payload)
+    except HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=ErrorDetail(
+                code='IMPACT_API_ERROR',
+                message=f'Impact API error: {exc.response.status_code}',
+                details=exc.response.text,
+            ).model_dump(),
+        ) from exc
+    except HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=ErrorDetail(
+                code='IMPACT_CONNECTIVITY_ERROR',
+                message='Unable to reach Impact API',
+            ).model_dump(),
+        ) from exc
+
+
+@router.get('/campaigns/{campaign_id}/deals/{deal_id}', response_model=ApiResponse[dict])
+async def get_impact_deal_by_id(
+    campaign_id: str,
+    deal_id: str,
+    credentials: HTTPBasicCredentials | None = Depends(impact_basic),
+) -> ApiResponse[dict]:
+    account_sid, auth_token = _resolve_impact_credentials(credentials)
+
+    try:
+        payload = await ImpactCampaignService.fetch_deal_by_id(
+            account_sid=account_sid,
+            auth_token=auth_token,
+            campaign_id=campaign_id,
+            deal_id=deal_id,
+        )
+        return ApiResponse(data=payload)
+    except HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=ErrorDetail(
+                code='IMPACT_API_ERROR',
+                message=f'Impact API error: {exc.response.status_code}',
+                details=exc.response.text,
+            ).model_dump(),
+        ) from exc
+    except HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=ErrorDetail(
+                code='IMPACT_CONNECTIVITY_ERROR',
+                message='Unable to reach Impact API',
+            ).model_dump(),
+        ) from exc
+
+
 @router.get('/catalogs', response_model=ApiResponse[dict])
 async def get_impact_catalogs(
     credentials: HTTPBasicCredentials | None = Depends(impact_basic),
