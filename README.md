@@ -179,4 +179,4 @@ Next, we can add each platform router from your cURL commands one-by-one.
 - Backend route: `POST /api/v1/claude/generate`
 - Requires `CLAUDE_API_KEY` in `.env`
 - Upstream URL: `https://api.anthropic.com/v1/messages`
-- Supports model fallback via `modelCandidates`
+- Supports model fallback via `modelCandidatess`
