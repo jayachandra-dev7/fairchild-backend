@@ -3,6 +3,7 @@ from typing import Any
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 from httpx import HTTPError, HTTPStatusError
 
+from app.core.config import get_settings
 from app.schemas.common import ApiResponse, ErrorDetail
 from app.schemas.metricool.auth import MetricoolAuthorizeRequest, MetricoolAuthorizeResponse
 from app.schemas.metricool.post import MetricoolSchedulerPostRequest
@@ -10,6 +11,7 @@ from app.services.metricool.service import MetricoolService
 from app.services.platform_auth_service import platform_auth_service
 
 router = APIRouter(prefix='/metricool', tags=['Metricool'])
+settings = get_settings()
 
 
 @router.get('/health')
@@ -142,18 +144,28 @@ async def metricool_create_scheduler_post(
 async def metricool_get_scheduler_posts(
     start: str = Query(min_length=1),
     end: str = Query(min_length=1),
-    user_id: str = Query(alias='userId', min_length=1),
-    blog_id: str = Query(alias='blogId', min_length=1),
+    user_id: str | None = Query(default=None, alias='userId'),
+    blog_id: str | None = Query(default=None, alias='blogId'),
     timezone: str = Query(default='America/Denver'),
     extended_range: bool = Query(default=True, alias='extendedRange'),
 ) -> ApiResponse[Any]:
     token = _resolve_metricool_token()
+    resolved_user_id = user_id or settings.METRICOOL_USER_ID
+    resolved_blog_id = blog_id or settings.METRICOOL_BLOG_ID
+    if not resolved_user_id or not resolved_blog_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=ErrorDetail(
+                code='MISSING_METRICOOL_IDS',
+                message='Provide userId/blogId or set METRICOOL_USER_ID and METRICOOL_BLOG_ID in .env',
+            ).model_dump(),
+        )
 
     try:
         payload = await MetricoolService.get_scheduler_posts(
             token=token,
-            user_id=user_id,
-            blog_id=blog_id,
+            user_id=resolved_user_id,
+            blog_id=resolved_blog_id,
             start=start,
             end=end,
             timezone=timezone,

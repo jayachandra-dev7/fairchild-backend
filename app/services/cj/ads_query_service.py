@@ -64,7 +64,7 @@ class CJAdsQueryService:
             ') { '
             'totalCount count limit nextPage '
             'resultList { '
-            'advertiserId catalogId id title description imageLink link '
+            'advertiserId catalogId advertiserName id title description imageLink link '
             'price { amount currency } '
             'salePrice { amount currency } '
             f'linkCode(pid: "{request.pid}") {{ clickUrl imageUrl }} '

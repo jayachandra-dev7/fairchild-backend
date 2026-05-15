@@ -43,7 +43,7 @@ uvicorn app.main:app --reload
 
 ## Local Env Credentials
 - For local testing, credentials can be loaded from `.env` at app startup.
-- Supported keys: `CJ_TOKEN`, `IMPACT_ACCOUNT_SID`, `IMPACT_AUTH_TOKEN`, `WORDPRESS_DOMAIN`, `WORDPRESS_WC_CONSUMER_KEY`, `WORDPRESS_WC_CONSUMER_SECRET`, `METRICOOL_TOKEN`, `RENDERFORM_API_KEY`.
+- Supported keys: `CJ_TOKEN`, `IMPACT_ACCOUNT_SID`, `IMPACT_AUTH_TOKEN`, `WORDPRESS_DOMAIN`, `WORDPRESS_WC_CONSUMER_KEY`, `WORDPRESS_WC_CONSUMER_SECRET`, `METRICOOL_TOKEN`, `METRICOOL_USER_ID`, `METRICOOL_BLOG_ID`, `RENDERFORM_API_KEY`, `CLAUDE_API_KEY`.
 - You can still call each platform `authorize` endpoint later to override in-memory values for the running process.
 
 ## Docs
@@ -55,6 +55,8 @@ uvicorn app.main:app --reload
 - `GET /api/v1/platforms`
 - `GET /api/v1/cj/health`
 - `POST /api/v1/cj/authorize`
+- `GET /api/v1/claude/health`
+- `POST /api/v1/claude/generate`
 - `GET /api/v1/impact/health`
 - `POST /api/v1/impact/authorize`
 - `GET /api/v1/impact/campaigns`
@@ -140,7 +142,8 @@ Next, we can add each platform router from your cURL commands one-by-one.
 - Upload field: `picture` as multipart file
 - Upstream URL: `https://app.metricool.com/api/utils/upload?userId=<USER_ID>&blogId=<BLOG_ID>`
 - Backend route: `GET /api/v1/metricool/scheduler/posts`
-- Required query params: `start`, `end`, `userId`, `blogId`
+- Required query params: `start`, `end`
+- `userId` and `blogId` are optional in request if `METRICOOL_USER_ID` and `METRICOOL_BLOG_ID` are set in `.env`
 - Optional query params: `timezone` default `America/Denver`, `extendedRange` default `true`
 - Backend route: `POST /api/v1/metricool/scheduler/posts`
 - Required query params: `userId`, `blogId`
@@ -171,3 +174,9 @@ Next, we can add each platform router from your cURL commands one-by-one.
 - Backend route: `POST /api/v1/renderform/render/upload`
 - Upload field: `image` (multipart)
 - The backend converts uploaded image to data URL and sends it as `image.src`
+
+## Claude
+- Backend route: `POST /api/v1/claude/generate`
+- Requires `CLAUDE_API_KEY` in `.env`
+- Upstream URL: `https://api.anthropic.com/v1/messages`
+- Supports model fallback via `modelCandidates`

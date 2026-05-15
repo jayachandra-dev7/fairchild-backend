@@ -22,8 +22,11 @@ class Settings(BaseSettings):
     WORDPRESS_WC_CONSUMER_SECRET: str = ''
 
     METRICOOL_TOKEN: str = ''
+    METRICOOL_USER_ID: str = ''
+    METRICOOL_BLOG_ID: str = ''
 
     RENDERFORM_API_KEY: str = ''
+    CLAUDE_API_KEY: str = ''
 
 
 @lru_cache
