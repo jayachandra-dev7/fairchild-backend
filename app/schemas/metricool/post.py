@@ -56,6 +56,13 @@ class MetricoolTikTokData(BaseModel):
     commercial_content_third_party: bool = Field(default=False, alias='commercialContentThirdParty')
 
 
+class MetricoolPinterestData(BaseModel):
+    board_id: str = Field(default='', alias='boardId')
+    pin_title: str = Field(default='', alias='pinTitle')
+    pin_link: str = Field(default='', alias='pinLink')
+    pin_new_format: bool = Field(default=False, alias='pinNewFormat')
+
+
 class MetricoolThreadsData(BaseModel):
     allowed_country_codes: list[str] = Field(default_factory=list, alias='allowedCountryCodes')
     reply_control: str = Field(default='EVERYONE', alias='replyControl')
@@ -93,6 +100,7 @@ class MetricoolSchedulerPostRequest(BaseModel):
                 'instagramData': {'type': 'POST', 'showReelOnFeed': True, 'collaborators': [], 'shareTrialAutomatically': False},
                 'linkedinData': {'type': 'POST', 'previewIncluded': True, 'publishImagesAsPDF': False},
                 'gmbData': {'type': 'publication'},
+                'pinterestData': {'boardId': '', 'pinTitle': '', 'pinLink': '', 'pinNewFormat': False},
                 'tiktokData': {
                     'disableComment': False,
                     'disableDuet': False,
@@ -139,5 +147,6 @@ class MetricoolSchedulerPostRequest(BaseModel):
     instagram_data: MetricoolInstagramData = Field(default_factory=MetricoolInstagramData, alias='instagramData')
     linkedin_data: MetricoolLinkedInData = Field(default_factory=MetricoolLinkedInData, alias='linkedinData')
     gmb_data: MetricoolGmbData = Field(default_factory=MetricoolGmbData, alias='gmbData')
+    pinterest_data: MetricoolPinterestData = Field(default_factory=MetricoolPinterestData, alias='pinterestData')
     tiktok_data: MetricoolTikTokData = Field(default_factory=MetricoolTikTokData, alias='tiktokData')
     threads_data: MetricoolThreadsData = Field(default_factory=MetricoolThreadsData, alias='threadsData')

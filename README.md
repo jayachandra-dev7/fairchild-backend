@@ -77,6 +77,7 @@ uvicorn app.main:app --reload
 - `GET /api/v1/metricool/profiles`
 - `POST /api/v1/metricool/upload`
 - `GET /api/v1/metricool/scheduler/posts`
+- `GET /api/v1/metricool/scheduler/boards/pinterest`
 - `POST /api/v1/metricool/scheduler/posts`
 - `GET /api/v1/renderform/health`
 - `POST /api/v1/renderform/authorize`
@@ -145,6 +146,9 @@ Next, we can add each platform router from your cURL commands one-by-one.
 - Required query params: `start`, `end`
 - `userId` and `blogId` are optional in request if `METRICOOL_USER_ID` and `METRICOOL_BLOG_ID` are set in `.env`
 - Optional query params: `timezone` default `America/Denver`, `extendedRange` default `true`
+- Backend route: `GET /api/v1/metricool/scheduler/boards/pinterest`
+- `userId` and `blogId` are optional in request if `METRICOOL_USER_ID` and `METRICOOL_BLOG_ID` are set in `.env`
+- Upstream URL: `https://app.metricool.com/api/v2/scheduler/boards/pinterest?userId=<USER_ID>&blogId=<BLOG_ID>`
 - Backend route: `POST /api/v1/metricool/scheduler/posts`
 - Required query params: `userId`, `blogId`
 - Upstream URL: `https://app.metricool.com/api/v2/scheduler/posts?userId=<USER_ID>&blogId=<BLOG_ID>`

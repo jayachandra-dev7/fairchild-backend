@@ -189,3 +189,46 @@ async def metricool_get_scheduler_posts(
                 message='Unable to reach Metricool API',
             ).model_dump(),
         ) from exc
+
+
+@router.get('/scheduler/boards/pinterest', response_model=ApiResponse[Any])
+async def metricool_get_pinterest_boards(
+    user_id: str | None = Query(default=None, alias='userId'),
+    blog_id: str | None = Query(default=None, alias='blogId'),
+) -> ApiResponse[Any]:
+    token = _resolve_metricool_token()
+    resolved_user_id = user_id or settings.METRICOOL_USER_ID
+    resolved_blog_id = blog_id or settings.METRICOOL_BLOG_ID
+    if not resolved_user_id or not resolved_blog_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=ErrorDetail(
+                code='MISSING_METRICOOL_IDS',
+                message='Provide userId/blogId or set METRICOOL_USER_ID and METRICOOL_BLOG_ID in .env',
+            ).model_dump(),
+        )
+
+    try:
+        payload = await MetricoolService.get_pinterest_boards(
+            token=token,
+            user_id=resolved_user_id,
+            blog_id=resolved_blog_id,
+        )
+        return ApiResponse(data=payload)
+    except HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=ErrorDetail(
+                code='METRICOOL_API_ERROR',
+                message=f'Metricool API error: {exc.response.status_code}',
+                details=exc.response.text,
+            ).model_dump(),
+        ) from exc
+    except HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=ErrorDetail(
+                code='METRICOOL_CONNECTIVITY_ERROR',
+                message='Unable to reach Metricool API',
+            ).model_dump(),
+        ) from exc

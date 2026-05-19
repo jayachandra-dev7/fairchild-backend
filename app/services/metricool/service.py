@@ -10,6 +10,7 @@ class MetricoolService:
     profiles_url = 'https://app.metricool.com/api/admin/simpleProfiles'
     upload_url = 'https://app.metricool.com/api/utils/upload'
     scheduler_url = 'https://app.metricool.com/api/v2/scheduler/posts'
+    pinterest_boards_url = 'https://app.metricool.com/api/v2/scheduler/boards/pinterest'
 
     @classmethod
     def _parse_response(cls, response: httpx.Response) -> Any:
@@ -154,6 +155,32 @@ class MetricoolService:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.get(
                 cls.scheduler_url,
+                params=params,
+                headers=headers,
+            )
+            response.raise_for_status()
+            return cls._parse_response(response)
+
+    @classmethod
+    async def get_pinterest_boards(
+        cls,
+        *,
+        token: str,
+        user_id: str,
+        blog_id: str,
+    ) -> Any:
+        headers = {
+            'X-Mc-Auth': token,
+            'Content-Type': 'application/json',
+        }
+        params = {
+            'userId': user_id,
+            'blogId': blog_id,
+        }
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(
+                cls.pinterest_boards_url,
                 params=params,
                 headers=headers,
             )
