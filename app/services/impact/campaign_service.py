@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 import httpx
@@ -5,6 +6,7 @@ import httpx
 
 class ImpactCampaignService:
     base_url_template = 'https://api.impact.com/Mediapartners/{account_sid}'
+    transient_status_codes = {429, 500, 502, 503, 504}
 
     @classmethod
     async def _request(
@@ -20,17 +22,38 @@ class ImpactCampaignService:
         url = f"{cls.base_url_template.format(account_sid=account_sid)}{path}"
         headers = {'Accept': 'application/json'}
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.request(
-                method,
-                url,
-                headers=headers,
-                auth=(account_sid, auth_token),
-                params=params,
-                data=data,
-            )
-            response.raise_for_status()
-            return response.json()
+        max_attempts = 3 if method.upper() == 'GET' else 1
+        for attempt in range(max_attempts):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.request(
+                        method,
+                        url,
+                        headers=headers,
+                        auth=(account_sid, auth_token),
+                        params=params,
+                        data=data,
+                    )
+                    response.raise_for_status()
+                    return response.json()
+            except httpx.HTTPStatusError as exc:
+                should_retry = (
+                    method.upper() == 'GET'
+                    and exc.response.status_code in cls.transient_status_codes
+                    and attempt < max_attempts - 1
+                )
+                if should_retry:
+                    await asyncio.sleep(0.4 * (attempt + 1))
+                    continue
+                raise
+            except httpx.RequestError:
+                should_retry = method.upper() == 'GET' and attempt < max_attempts - 1
+                if should_retry:
+                    await asyncio.sleep(0.4 * (attempt + 1))
+                    continue
+                raise
+
+        raise RuntimeError('Unexpected retry flow termination in ImpactCampaignService._request')
 
     @classmethod
     def _build_pagination_params(
