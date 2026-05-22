@@ -18,6 +18,11 @@ app = FastAPI(
     redoc_url='/redoc',
 )
 
+
+@app.get('/')
+def root() -> dict[str, str]:
+    return {'status': 'ok', 'service': settings.APP_NAME, 'version': settings.APP_VERSION}
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.FRONTEND_LOCAL_ORIGIN, settings.FRONTEND_PROD_ORIGIN],

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 DEFAULT_MODEL_CANDIDATES = [
@@ -11,6 +11,8 @@ DEFAULT_MODEL_CANDIDATES = [
 
 
 class ClaudeGenerateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
+
     prompt: str = Field(default='Write 3 short title ideas for a product post.', min_length=1)
     model_candidates: list[str] = Field(default_factory=lambda: DEFAULT_MODEL_CANDIDATES.copy(), alias='modelCandidates')
     max_tokens: int = Field(default=500, ge=1, le=4096, alias='maxTokens')
