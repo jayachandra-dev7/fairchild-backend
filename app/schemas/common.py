@@ -10,6 +10,8 @@ class ErrorDetail(BaseModel):
     code: str
     message: str
     details: Optional[Any] = None
+    retryable: Optional[bool] = None
+    step: Optional[str] = None
 
 
 class ApiResponse(BaseModel, Generic[T]):

@@ -8,6 +8,9 @@ from app.schemas.renderform.auth import RenderFormAuthorizeRequest, RenderFormAu
 from app.schemas.renderform.render import RenderFormRenderRequest
 from app.services.platform_auth_service import platform_auth_service
 from app.services.renderform.service import RenderFormService
+from app.utils.image_validation import ImageValidationError, fetch_and_validate_image_url, validate_image_bytes
+from app.utils.pipeline_errors import raise_pipeline_error
+from app.utils.retry import run_with_retry
 
 router = APIRouter(prefix='/renderform', tags=['RenderForm'])
 
@@ -73,6 +76,37 @@ async def renderform_render(
     body: RenderFormRenderRequest,
 ) -> ApiResponse[Any]:
     api_key = _resolve_renderform_api_key()
+    completed_steps: list[str] = []
+    if body.image_src.strip().lower().startswith(('http://', 'https://')):
+        try:
+            await run_with_retry(
+                step='renderform_render',
+                operation=lambda: fetch_and_validate_image_url(body.image_src.strip()),
+            )
+        except ImageValidationError as exc:
+            raise_pipeline_error(
+                status_code=422,
+                code='IMAGE_INVALID_OR_BLANK',
+                message=exc.message,
+                details=exc.details,
+                retryable=False,
+                step='renderform_render',
+                completed_steps=completed_steps,
+                failed_step='renderform_render',
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise_pipeline_error(
+                status_code=502,
+                code='RENDER_TIMEOUT',
+                message='Image validation failed due to temporary upstream/network issue.',
+                details={'error': exc.__class__.__name__},
+                retryable=True,
+                step='renderform_render',
+                completed_steps=completed_steps,
+                failed_step='renderform_render',
+                can_retry_from_step='renderform_render',
+            )
+
     data = {
         'title.text': body.title_text,
         'image.src': body.image_src,
@@ -80,29 +114,42 @@ async def renderform_render(
     }
 
     try:
-        payload = await RenderFormService.render_template(
-            api_key=api_key,
-            template=body.template,
-            data=data,
+        payload = await run_with_retry(
+            step='renderform_render',
+            operation=lambda: RenderFormService.render_template(
+                api_key=api_key,
+                template=body.template,
+                data=data,
+            ),
         )
+        completed_steps.append('renderform_render')
         return ApiResponse(data=payload)
     except HTTPStatusError as exc:
-        raise HTTPException(
+        code = 'UPSTREAM_RATE_LIMITED' if exc.response.status_code == 429 else 'RENDER_TIMEOUT'
+        retryable = exc.response.status_code in {429, 500, 502, 503, 504}
+        raise_pipeline_error(
             status_code=exc.response.status_code,
-            detail=ErrorDetail(
-                code='RENDERFORM_API_ERROR',
-                message=f'RenderForm API error: {exc.response.status_code}',
-                details=exc.response.text,
-            ).model_dump(),
-        ) from exc
+            code=code,
+            message='RenderForm request failed.',
+            details={'status_code': exc.response.status_code},
+            retryable=retryable,
+            step='renderform_render',
+            completed_steps=completed_steps,
+            failed_step='renderform_render',
+            can_retry_from_step='renderform_render' if retryable else None,
+        )
     except HTTPError as exc:
-        raise HTTPException(
+        raise_pipeline_error(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=ErrorDetail(
-                code='RENDERFORM_CONNECTIVITY_ERROR',
-                message='Unable to reach RenderForm API',
-            ).model_dump(),
-        ) from exc
+            code='RENDER_TIMEOUT',
+            message='RenderForm request timed out or failed to connect.',
+            details={'error': exc.__class__.__name__},
+            retryable=True,
+            step='renderform_render',
+            completed_steps=completed_steps,
+            failed_step='renderform_render',
+            can_retry_from_step='renderform_render',
+        )
 
 
 @router.post('/render/upload', response_model=ApiResponse[Any])
@@ -113,6 +160,24 @@ async def renderform_render_upload(
 ) -> ApiResponse[Any]:
     api_key = _resolve_renderform_api_key()
     image_bytes = await image.read()
+    completed_steps: list[str] = []
+    try:
+        validate_image_bytes(
+            image_bytes=image_bytes,
+            content_type=image.content_type or 'application/octet-stream',
+        )
+    except ImageValidationError as exc:
+        raise_pipeline_error(
+            status_code=422,
+            code='IMAGE_INVALID_OR_BLANK',
+            message=exc.message,
+            details=exc.details,
+            retryable=False,
+            step='renderform_render',
+            completed_steps=completed_steps,
+            failed_step='renderform_render',
+        )
+
     image_src = RenderFormService.to_data_url(
         file_bytes=image_bytes,
         content_type=image.content_type or 'application/octet-stream',
@@ -123,26 +188,39 @@ async def renderform_render_upload(
     }
 
     try:
-        payload = await RenderFormService.render_template(
-            api_key=api_key,
-            template=template,
-            data=data,
+        payload = await run_with_retry(
+            step='renderform_render',
+            operation=lambda: RenderFormService.render_template(
+                api_key=api_key,
+                template=template,
+                data=data,
+            ),
         )
+        completed_steps.append('renderform_render')
         return ApiResponse(data=payload)
     except HTTPStatusError as exc:
-        raise HTTPException(
+        code = 'UPSTREAM_RATE_LIMITED' if exc.response.status_code == 429 else 'RENDER_TIMEOUT'
+        retryable = exc.response.status_code in {429, 500, 502, 503, 504}
+        raise_pipeline_error(
             status_code=exc.response.status_code,
-            detail=ErrorDetail(
-                code='RENDERFORM_API_ERROR',
-                message=f'RenderForm API error: {exc.response.status_code}',
-                details=exc.response.text,
-            ).model_dump(),
-        ) from exc
+            code=code,
+            message='RenderForm request failed.',
+            details={'status_code': exc.response.status_code},
+            retryable=retryable,
+            step='renderform_render',
+            completed_steps=completed_steps,
+            failed_step='renderform_render',
+            can_retry_from_step='renderform_render' if retryable else None,
+        )
     except HTTPError as exc:
-        raise HTTPException(
+        raise_pipeline_error(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=ErrorDetail(
-                code='RENDERFORM_CONNECTIVITY_ERROR',
-                message='Unable to reach RenderForm API',
-            ).model_dump(),
-        ) from exc
+            code='RENDER_TIMEOUT',
+            message='RenderForm request timed out or failed to connect.',
+            details={'error': exc.__class__.__name__},
+            retryable=True,
+            step='renderform_render',
+            completed_steps=completed_steps,
+            failed_step='renderform_render',
+            can_retry_from_step='renderform_render',
+        )

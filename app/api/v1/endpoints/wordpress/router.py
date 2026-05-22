@@ -8,6 +8,9 @@ from app.schemas.wordpress.auth import WordPressAuthorizeRequest, WordPressAutho
 from app.schemas.wordpress.product import WooProductCreateRequest
 from app.services.wordpress.service import WordPressService
 from app.services.platform_auth_service import platform_auth_service
+from app.utils.image_validation import ImageValidationError, fetch_and_validate_image_url, validate_image_bytes
+from app.utils.pipeline_errors import raise_pipeline_error
+from app.utils.retry import run_with_retry
 
 router = APIRouter(prefix='/wordpress', tags=['WordPress'])
 
@@ -56,48 +59,91 @@ async def wordpress_upload_media(
     image_url: str | None = Form(default=None, alias='image_url'),
 ) -> ApiResponse[Any]:
     credentials = _resolve_wordpress_credentials()
+    completed_steps = ['renderform_render']
     if file is None and not (image_url and image_url.strip()):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=ErrorDetail(
-                code='INVALID_MEDIA_INPUT',
-                message='Provide either file or image_url',
-            ).model_dump(),
+        raise_pipeline_error(
+            status_code=422,
+            code='MEDIA_UPLOAD_INVALID_INPUT',
+            message='Provide either file or image_url',
+            retryable=False,
+            step='wordpress_media_upload',
+            completed_steps=completed_steps,
+            failed_step='wordpress_media_upload',
         )
 
     try:
         if image_url and image_url.strip():
-            payload = await WordPressService.upload_media_from_url(
-                domain=credentials['domain'],
-                wc_consumer_key=credentials['wc_consumer_key'],
-                wc_consumer_secret=credentials['wc_consumer_secret'],
-                image_url=image_url.strip(),
+            image_bytes, content_type = await run_with_retry(
+                step='wordpress_media_upload',
+                operation=lambda: fetch_and_validate_image_url(image_url.strip()),
+            )
+            payload = await run_with_retry(
+                step='wordpress_media_upload',
+                operation=lambda: WordPressService.upload_media_bytes(
+                    domain=credentials['domain'],
+                    wc_consumer_key=credentials['wc_consumer_key'],
+                    wc_consumer_secret=credentials['wc_consumer_secret'],
+                    filename=image_url.strip().split('/')[-1] or 'remote-image',
+                    content_type=content_type,
+                    file_bytes=image_bytes,
+                ),
             )
         else:
-            payload = await WordPressService.upload_media(
-                domain=credentials['domain'],
-                wc_consumer_key=credentials['wc_consumer_key'],
-                wc_consumer_secret=credentials['wc_consumer_secret'],
-                picture=file,
+            file_bytes = await file.read() if file else b''
+            validate_image_bytes(
+                image_bytes=file_bytes,
+                content_type=file.content_type if file else 'application/octet-stream',
             )
+            payload = await run_with_retry(
+                step='wordpress_media_upload',
+                operation=lambda: WordPressService.upload_media_bytes(
+                    domain=credentials['domain'],
+                    wc_consumer_key=credentials['wc_consumer_key'],
+                    wc_consumer_secret=credentials['wc_consumer_secret'],
+                    filename=file.filename if file else 'upload.bin',
+                    content_type=file.content_type if file else 'application/octet-stream',
+                    file_bytes=file_bytes,
+                ),
+            )
+        completed_steps.append('wordpress_media_upload')
         return ApiResponse(data=payload)
+    except ImageValidationError as exc:
+        raise_pipeline_error(
+            status_code=422,
+            code='IMAGE_INVALID_OR_BLANK',
+            message=exc.message,
+            details=exc.details,
+            retryable=False,
+            step='wordpress_media_upload',
+            completed_steps=completed_steps,
+            failed_step='wordpress_media_upload',
+        )
     except HTTPStatusError as exc:
-        raise HTTPException(
+        code = 'UPSTREAM_RATE_LIMITED' if exc.response.status_code == 429 else 'MEDIA_UPLOAD_INVALID_INPUT'
+        retryable = exc.response.status_code in {429, 500, 502, 503, 504}
+        raise_pipeline_error(
             status_code=exc.response.status_code,
-            detail=ErrorDetail(
-                code='WORDPRESS_API_ERROR',
-                message=f'WordPress API error: {exc.response.status_code}',
-                details=exc.response.text,
-            ).model_dump(),
-        ) from exc
+            code=code,
+            message='WordPress media upload failed.',
+            details={'status_code': exc.response.status_code},
+            retryable=retryable,
+            step='wordpress_media_upload',
+            completed_steps=completed_steps,
+            failed_step='wordpress_media_upload',
+            can_retry_from_step='wordpress_media_upload' if retryable else None,
+        )
     except HTTPError as exc:
-        raise HTTPException(
+        raise_pipeline_error(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=ErrorDetail(
-                code='WORDPRESS_CONNECTIVITY_ERROR',
-                message='Unable to reach WordPress API',
-            ).model_dump(),
-        ) from exc
+            code='MEDIA_UPLOAD_INVALID_INPUT',
+            message='WordPress media upload failed due to network timeout/connectivity issue.',
+            details={'error': exc.__class__.__name__},
+            retryable=True,
+            step='wordpress_media_upload',
+            completed_steps=completed_steps,
+            failed_step='wordpress_media_upload',
+            can_retry_from_step='wordpress_media_upload',
+        )
 
 
 @router.post('/products', response_model=ApiResponse[Any])
@@ -105,29 +151,43 @@ async def wordpress_create_product(
     body: WooProductCreateRequest,
 ) -> ApiResponse[Any]:
     credentials = _resolve_wordpress_credentials()
+    completed_steps = ['renderform_render', 'wordpress_media_upload']
 
     try:
-        payload = await WordPressService.create_product(
-            domain=credentials['domain'],
-            wc_consumer_key=credentials['wc_consumer_key'],
-            wc_consumer_secret=credentials['wc_consumer_secret'],
-            payload=body,
+        payload = await run_with_retry(
+            step='wordpress_create_product',
+            operation=lambda: WordPressService.create_product(
+                domain=credentials['domain'],
+                wc_consumer_key=credentials['wc_consumer_key'],
+                wc_consumer_secret=credentials['wc_consumer_secret'],
+                payload=body,
+            ),
         )
+        completed_steps.append('wordpress_create_product')
         return ApiResponse(data=payload)
     except HTTPStatusError as exc:
-        raise HTTPException(
+        code = 'UPSTREAM_RATE_LIMITED' if exc.response.status_code == 429 else 'WORDPRESS_CREATE_FAILED'
+        retryable = exc.response.status_code in {429, 500, 502, 503, 504}
+        raise_pipeline_error(
             status_code=exc.response.status_code,
-            detail=ErrorDetail(
-                code='WORDPRESS_API_ERROR',
-                message=f'WordPress API error: {exc.response.status_code}',
-                details=exc.response.text,
-            ).model_dump(),
-        ) from exc
+            code=code,
+            message='WordPress product creation failed.',
+            details={'status_code': exc.response.status_code},
+            retryable=retryable,
+            step='wordpress_create_product',
+            completed_steps=completed_steps,
+            failed_step='wordpress_create_product',
+            can_retry_from_step='wordpress_create_product' if retryable else None,
+        )
     except HTTPError as exc:
-        raise HTTPException(
+        raise_pipeline_error(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=ErrorDetail(
-                code='WORDPRESS_CONNECTIVITY_ERROR',
-                message='Unable to reach WordPress API',
-            ).model_dump(),
-        ) from exc
+            code='WORDPRESS_CREATE_FAILED',
+            message='WordPress product creation failed due to network timeout/connectivity issue.',
+            details={'error': exc.__class__.__name__},
+            retryable=True,
+            step='wordpress_create_product',
+            completed_steps=completed_steps,
+            failed_step='wordpress_create_product',
+            can_retry_from_step='wordpress_create_product',
+        )

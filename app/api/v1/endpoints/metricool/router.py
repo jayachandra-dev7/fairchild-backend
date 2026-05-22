@@ -9,6 +9,8 @@ from app.schemas.metricool.auth import MetricoolAuthorizeRequest, MetricoolAutho
 from app.schemas.metricool.post import MetricoolSchedulerPostRequest
 from app.services.metricool.service import MetricoolService
 from app.services.platform_auth_service import platform_auth_service
+from app.utils.pipeline_errors import raise_pipeline_error
+from app.utils.retry import run_with_retry
 
 router = APIRouter(prefix='/metricool', tags=['Metricool'])
 settings = get_settings()
@@ -112,32 +114,46 @@ async def metricool_create_scheduler_post(
     blog_id: str = Query(alias='blogId', min_length=1),
 ) -> ApiResponse[Any]:
     token = _resolve_metricool_token()
+    completed_steps = ['renderform_render', 'wordpress_media_upload', 'wordpress_create_product']
 
     try:
-        payload = await MetricoolService.create_scheduler_post(
-            token=token,
-            user_id=user_id,
-            blog_id=blog_id,
-            payload=body,
+        payload = await run_with_retry(
+            step='metricool_scheduler_post',
+            operation=lambda: MetricoolService.create_scheduler_post(
+                token=token,
+                user_id=user_id,
+                blog_id=blog_id,
+                payload=body,
+            ),
         )
+        completed_steps.append('metricool_scheduler_post')
         return ApiResponse(data=payload)
     except HTTPStatusError as exc:
-        raise HTTPException(
+        code = 'UPSTREAM_RATE_LIMITED' if exc.response.status_code == 429 else 'METRICOOL_SCHEDULE_FAILED'
+        retryable = exc.response.status_code in {429, 500, 502, 503, 504}
+        raise_pipeline_error(
             status_code=exc.response.status_code,
-            detail=ErrorDetail(
-                code='METRICOOL_API_ERROR',
-                message=f'Metricool API error: {exc.response.status_code}',
-                details=exc.response.text,
-            ).model_dump(),
-        ) from exc
+            code=code,
+            message='Metricool scheduling failed.',
+            details={'status_code': exc.response.status_code},
+            retryable=retryable,
+            step='metricool_scheduler_post',
+            completed_steps=completed_steps,
+            failed_step='metricool_scheduler_post',
+            can_retry_from_step='metricool_scheduler_post' if retryable else None,
+        )
     except HTTPError as exc:
-        raise HTTPException(
+        raise_pipeline_error(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=ErrorDetail(
-                code='METRICOOL_CONNECTIVITY_ERROR',
-                message='Unable to reach Metricool API',
-            ).model_dump(),
-        ) from exc
+            code='METRICOOL_SCHEDULE_FAILED',
+            message='Metricool scheduling failed due to network timeout/connectivity issue.',
+            details={'error': exc.__class__.__name__},
+            retryable=True,
+            step='metricool_scheduler_post',
+            completed_steps=completed_steps,
+            failed_step='metricool_scheduler_post',
+            can_retry_from_step='metricool_scheduler_post',
+        )
 
 
 @router.get('/scheduler/posts', response_model=ApiResponse[Any])

@@ -8,6 +8,7 @@ from app.schemas.impact.auth import ImpactAuthorizeRequest, ImpactAuthorizeRespo
 from app.schemas.impact.tracking_link import ImpactTrackingLinkCreateRequest
 from app.services.impact.campaign_service import ImpactCampaignService
 from app.services.platform_auth_service import platform_auth_service
+from app.utils.keyword_guard import normalize_keyword_for_search
 
 router = APIRouter(prefix='/impact', tags=['Impact'])
 impact_basic = HTTPBasic(auto_error=False)
@@ -240,13 +241,14 @@ async def get_impact_catalog_items(
     credentials: HTTPBasicCredentials | None = Depends(impact_basic),
 ) -> ApiResponse[dict]:
     account_sid, auth_token = _resolve_impact_credentials(credentials)
+    normalized_keyword = normalize_keyword_for_search(keyword, step='impact_catalog_items_search') if keyword is not None else None
 
     try:
         payload = await ImpactCampaignService.fetch_catalog_items(
             account_sid=account_sid,
             auth_token=auth_token,
             catalog_id=catalog_id,
-            keyword=keyword,
+            keyword=normalized_keyword,
             limit=limit,
             offset=offset,
         )
@@ -278,12 +280,13 @@ async def search_impact_items(
     credentials: HTTPBasicCredentials | None = Depends(impact_basic),
 ) -> ApiResponse[dict]:
     account_sid, auth_token = _resolve_impact_credentials(credentials)
+    normalized_keyword = normalize_keyword_for_search(keyword, step='impact_item_search') if keyword is not None else None
 
     try:
         payload = await ImpactCampaignService.search_items(
             account_sid=account_sid,
             auth_token=auth_token,
-            keyword=keyword,
+            keyword=normalized_keyword,
             limit=limit,
             offset=offset,
         )

@@ -9,6 +9,7 @@ from app.schemas.platform_auth import PlatformAuthorizeRequest, PlatformAuthoriz
 from app.services.cj.ads_query_service import CJAdsQueryService
 from app.services.cj.advertiser_lookup_service import CJAdvertiserLookupService
 from app.services.platform_auth_service import platform_auth_service
+from app.utils.keyword_guard import normalize_keyword_for_search
 
 router = APIRouter(prefix='/cj', tags=['CJ'])
 cj_bearer = HTTPBearer(
@@ -128,6 +129,8 @@ async def query_cj_products(body: CJAdsProductsQueryRequest) -> ApiResponse[dict
                 message='For CJ pagination, use page token from previous response nextPage when offset > 0',
             ).model_dump(),
         )
+
+    body.keywords = [normalize_keyword_for_search(keyword, step='cj_ads_products_query') for keyword in body.keywords]
 
     try:
         payload = await CJAdsQueryService.query_products(
