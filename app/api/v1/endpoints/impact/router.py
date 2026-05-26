@@ -238,6 +238,7 @@ async def get_impact_catalog_items(
     keyword: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100, description='Page size for list pagination'),
     offset: int = Query(default=0, ge=0, description='Offset for list pagination'),
+    next_page_id: str | None = Query(default=None, alias='nextPageId', description='Impact cursor token (mapped to upstream AfterId)'),
     credentials: HTTPBasicCredentials | None = Depends(impact_basic),
 ) -> ApiResponse[dict]:
     account_sid, auth_token = _resolve_impact_credentials(credentials)
@@ -251,6 +252,47 @@ async def get_impact_catalog_items(
             keyword=normalized_keyword,
             limit=limit,
             offset=offset,
+            after_id=next_page_id,
+        )
+        return ApiResponse(data=payload)
+    except HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=ErrorDetail(
+                code='IMPACT_API_ERROR',
+                message=f'Impact API error: {exc.response.status_code}',
+                details=exc.response.text,
+            ).model_dump(),
+        ) from exc
+    except HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=ErrorDetail(
+                code='IMPACT_CONNECTIVITY_ERROR',
+                message='Unable to reach Impact API',
+            ).model_dump(),
+        ) from exc
+
+
+@router.get('/catalogs/{catalog_id}/items/by-keyword', response_model=ApiResponse[dict])
+async def get_impact_catalog_items_by_keyword(
+    catalog_id: str,
+    keyword: str = Query(..., min_length=1),
+    limit: int = Query(default=20, ge=1, le=100, description='Page size'),
+    next_page_id: str | None = Query(default=None, alias='nextPageId', description='Impact cursor token (mapped to upstream AfterId)'),
+    credentials: HTTPBasicCredentials | None = Depends(impact_basic),
+) -> ApiResponse[dict]:
+    account_sid, auth_token = _resolve_impact_credentials(credentials)
+    normalized_keyword = normalize_keyword_for_search(keyword, step='impact_catalog_items_search')
+
+    try:
+        payload = await ImpactCampaignService.fetch_catalog_items(
+            account_sid=account_sid,
+            auth_token=auth_token,
+            catalog_id=catalog_id,
+            keyword=normalized_keyword,
+            limit=limit,
+            after_id=next_page_id,
         )
         return ApiResponse(data=payload)
     except HTTPStatusError as exc:
@@ -277,6 +319,7 @@ async def search_impact_items(
     keyword: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100, description='Page size for list pagination'),
     offset: int = Query(default=0, ge=0, description='Offset for list pagination'),
+    next_page_id: str | None = Query(default=None, alias='nextPageId', description='Impact cursor token (mapped to upstream AfterId)'),
     credentials: HTTPBasicCredentials | None = Depends(impact_basic),
 ) -> ApiResponse[dict]:
     account_sid, auth_token = _resolve_impact_credentials(credentials)
@@ -289,6 +332,7 @@ async def search_impact_items(
             keyword=normalized_keyword,
             limit=limit,
             offset=offset,
+            after_id=next_page_id,
         )
         return ApiResponse(data=payload)
     except HTTPStatusError as exc:

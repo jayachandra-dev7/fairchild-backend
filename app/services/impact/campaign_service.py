@@ -61,12 +61,17 @@ class ImpactCampaignService:
         *,
         limit: int | None,
         offset: int | None,
+        after_id: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {}
+        if limit is not None:
+            params['PageSize'] = limit
+        if after_id:
+            params['AfterId'] = after_id
+            return params
         if limit is None or offset is None:
             return params
         page = (offset // limit) + 1
-        params['PageSize'] = limit
         params['Page'] = page
         return params
 
@@ -131,8 +136,9 @@ class ImpactCampaignService:
         keyword: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
+        after_id: str | None = None,
     ) -> dict[str, Any]:
-        params = cls._build_pagination_params(limit=limit, offset=offset)
+        params = cls._build_pagination_params(limit=limit, offset=offset, after_id=after_id)
         if keyword:
             params['keyword'] = keyword
         return await cls._request(
@@ -152,8 +158,9 @@ class ImpactCampaignService:
         keyword: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
+        after_id: str | None = None,
     ) -> dict[str, Any]:
-        params = cls._build_pagination_params(limit=limit, offset=offset)
+        params = cls._build_pagination_params(limit=limit, offset=offset, after_id=after_id)
         if keyword:
             params['keyword'] = keyword
         return await cls._request(
