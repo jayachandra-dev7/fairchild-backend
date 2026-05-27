@@ -1,4 +1,5 @@
 from typing import Any
+import asyncio
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from httpx import HTTPError, HTTPStatusError
@@ -13,6 +14,8 @@ from app.utils.pipeline_errors import raise_pipeline_error
 from app.utils.retry import run_with_retry
 
 router = APIRouter(prefix='/renderform', tags=['RenderForm'])
+MAX_BLANK_RENDER_RETRIES = 2
+BLANK_RENDER_RETRY_DELAYS = [0.7, 1.4]
 
 
 @router.get('/health')
@@ -114,14 +117,59 @@ async def renderform_render(
     }
 
     try:
-        payload = await run_with_retry(
-            step='renderform_render',
-            operation=lambda: RenderFormService.render_template(
-                api_key=api_key,
-                template=body.template,
-                data=data,
-            ),
-        )
+        payload: Any | None = None
+        validation_error_details: Any | None = None
+        for attempt in range(MAX_BLANK_RENDER_RETRIES + 1):
+            payload = await run_with_retry(
+                step='renderform_render',
+                operation=lambda: RenderFormService.render_template(
+                    api_key=api_key,
+                    template=body.template,
+                    data=data,
+                ),
+            )
+            rendered_image_url = RenderFormService.extract_rendered_image_url(payload)
+            if not rendered_image_url:
+                break
+            try:
+                await run_with_retry(
+                    step='renderform_render',
+                    operation=lambda: fetch_and_validate_image_url(rendered_image_url),
+                )
+                validation_error_details = None
+                break
+            except ImageValidationError as exc:
+                validation_error_details = {
+                    'renderedImageUrl': rendered_image_url,
+                    'validation': exc.details,
+                    'attempt': attempt + 1,
+                }
+                if attempt < MAX_BLANK_RENDER_RETRIES:
+                    await asyncio.sleep(BLANK_RENDER_RETRY_DELAYS[min(attempt, len(BLANK_RENDER_RETRY_DELAYS) - 1)])
+                    continue
+                raise_pipeline_error(
+                    status_code=422,
+                    code='IMAGE_INVALID_OR_BLANK',
+                    message='Rendered image is blank/invalid after retries.',
+                    details=validation_error_details,
+                    retryable=False,
+                    step='renderform_render',
+                    completed_steps=completed_steps,
+                    failed_step='renderform_render',
+                )
+
+        if payload is None:
+            raise_pipeline_error(
+                status_code=502,
+                code='RENDER_TIMEOUT',
+                message='RenderForm request failed before producing output.',
+                details={'reason': 'empty_render_payload'},
+                retryable=True,
+                step='renderform_render',
+                completed_steps=completed_steps,
+                failed_step='renderform_render',
+                can_retry_from_step='renderform_render',
+            )
         completed_steps.append('renderform_render')
         return ApiResponse(data=payload)
     except HTTPStatusError as exc:
@@ -188,14 +236,59 @@ async def renderform_render_upload(
     }
 
     try:
-        payload = await run_with_retry(
-            step='renderform_render',
-            operation=lambda: RenderFormService.render_template(
-                api_key=api_key,
-                template=template,
-                data=data,
-            ),
-        )
+        payload: Any | None = None
+        validation_error_details: Any | None = None
+        for attempt in range(MAX_BLANK_RENDER_RETRIES + 1):
+            payload = await run_with_retry(
+                step='renderform_render',
+                operation=lambda: RenderFormService.render_template(
+                    api_key=api_key,
+                    template=template,
+                    data=data,
+                ),
+            )
+            rendered_image_url = RenderFormService.extract_rendered_image_url(payload)
+            if not rendered_image_url:
+                break
+            try:
+                await run_with_retry(
+                    step='renderform_render',
+                    operation=lambda: fetch_and_validate_image_url(rendered_image_url),
+                )
+                validation_error_details = None
+                break
+            except ImageValidationError as exc:
+                validation_error_details = {
+                    'renderedImageUrl': rendered_image_url,
+                    'validation': exc.details,
+                    'attempt': attempt + 1,
+                }
+                if attempt < MAX_BLANK_RENDER_RETRIES:
+                    await asyncio.sleep(BLANK_RENDER_RETRY_DELAYS[min(attempt, len(BLANK_RENDER_RETRY_DELAYS) - 1)])
+                    continue
+                raise_pipeline_error(
+                    status_code=422,
+                    code='IMAGE_INVALID_OR_BLANK',
+                    message='Rendered image is blank/invalid after retries.',
+                    details=validation_error_details,
+                    retryable=False,
+                    step='renderform_render',
+                    completed_steps=completed_steps,
+                    failed_step='renderform_render',
+                )
+
+        if payload is None:
+            raise_pipeline_error(
+                status_code=502,
+                code='RENDER_TIMEOUT',
+                message='RenderForm request failed before producing output.',
+                details={'reason': 'empty_render_payload'},
+                retryable=True,
+                step='renderform_render',
+                completed_steps=completed_steps,
+                failed_step='renderform_render',
+                can_retry_from_step='renderform_render',
+            )
         completed_steps.append('renderform_render')
         return ApiResponse(data=payload)
     except HTTPStatusError as exc:
