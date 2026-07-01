@@ -191,3 +191,50 @@ async def wordpress_create_product(
             failed_step='wordpress_create_product',
             can_retry_from_step='wordpress_create_product',
         )
+
+
+@router.get('/products/categories', response_model=ApiResponse[Any])
+async def wordpress_list_product_categories(
+    per_page: int = 100,
+    page: int = 1,
+) -> ApiResponse[Any]:
+    credentials = _resolve_wordpress_credentials()
+
+    try:
+        payload = await run_with_retry(
+            step='wordpress_list_product_categories',
+            operation=lambda: WordPressService.list_product_categories(
+                domain=credentials['domain'],
+                wc_consumer_key=credentials['wc_consumer_key'],
+                wc_consumer_secret=credentials['wc_consumer_secret'],
+                per_page=per_page,
+                page=page,
+            ),
+        )
+        return ApiResponse(data=payload)
+    except HTTPStatusError as exc:
+        code = 'UPSTREAM_RATE_LIMITED' if exc.response.status_code == 429 else 'WORDPRESS_CREATE_FAILED'
+        retryable = exc.response.status_code in {429, 500, 502, 503, 504}
+        raise_pipeline_error(
+            status_code=exc.response.status_code,
+            code=code,
+            message='WordPress product categories fetch failed.',
+            details={'status_code': exc.response.status_code},
+            retryable=retryable,
+            step='wordpress_list_product_categories',
+            completed_steps=[],
+            failed_step='wordpress_list_product_categories',
+            can_retry_from_step='wordpress_list_product_categories' if retryable else None,
+        )
+    except HTTPError as exc:
+        raise_pipeline_error(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            code='WORDPRESS_CATEGORIES_FAILED',
+            message='WordPress product categories fetch failed due to network timeout/connectivity issue.',
+            details={'error': exc.__class__.__name__},
+            retryable=True,
+            step='wordpress_list_product_categories',
+            completed_steps=[],
+            failed_step='wordpress_list_product_categories',
+            can_retry_from_step='wordpress_list_product_categories',
+        )

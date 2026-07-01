@@ -108,3 +108,28 @@ class WordPressService:
             )
             response.raise_for_status()
             return response.json()
+
+    @classmethod
+    async def list_product_categories(
+        cls,
+        *,
+        domain: str,
+        wc_consumer_key: str,
+        wc_consumer_secret: str,
+        per_page: int = 100,
+        page: int = 1,
+    ) -> Any:
+        base = cls._normalize_domain(domain)
+        url = f'{base}/wp-json/wc/v3/products/categories'
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(
+                url,
+                auth=(wc_consumer_key, wc_consumer_secret),
+                params={
+                    'per_page': per_page,
+                    'page': page,
+                },
+            )
+            response.raise_for_status()
+            return response.json()

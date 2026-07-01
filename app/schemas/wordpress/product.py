@@ -7,6 +7,10 @@ class WooProductImage(BaseModel):
     id: int
 
 
+class WooProductCategory(BaseModel):
+    id: int
+
+
 class WooProductMetaData(BaseModel):
     key: str = Field(min_length=1)
     value: Any
@@ -24,5 +28,6 @@ class WooProductCreateRequest(BaseModel):
     button_text: str = Field(default='Buy Now')
     regular_price: str = Field(default='')
     sale_price: str = Field(default='')
+    categories: list[WooProductCategory] = Field(default_factory=list)
     images: list[WooProductImage] = Field(default_factory=list)
     meta_data: list[WooProductMetaData] = Field(default_factory=list)
