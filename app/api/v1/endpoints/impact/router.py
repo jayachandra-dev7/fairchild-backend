@@ -13,6 +13,44 @@ from app.utils.keyword_guard import normalize_keyword_for_search
 router = APIRouter(prefix='/impact', tags=['Impact'])
 impact_basic = HTTPBasic(auto_error=False)
 
+_SORTABLE = ', '.join(ImpactCampaignService.sortable_fields)
+
+# Shared server-side filter/sort controls forwarded to Impact's catalog endpoints.
+SORT_BY_QUERY = Query(
+    default=None,
+    alias='sortBy',
+    description=f'Field to sort by, applied upstream by Impact. Allowed values: {_SORTABLE}. Any other value is rejected with 422 rather than forwarded.',
+    examples=['DiscountPercentage'],
+)
+SORT_ORDER_QUERY = Query(
+    default=None,
+    alias='sortOrder',
+    description='Sort direction: ASC or DESC. Only meaningful together with sortBy.',
+    examples=['DESC'],
+)
+MIN_DISCOUNT_QUERY = Query(
+    default=None,
+    ge=0,
+    le=100,
+    alias='minDiscount',
+    description='Minimum discount percentage. Sent upstream as the numeric condition DiscountPercentage>{value}.',
+    examples=[30],
+)
+MIN_PRICE_QUERY = Query(
+    default=None,
+    ge=0,
+    alias='minPrice',
+    description='Minimum current price. Sent upstream as the numeric condition CurrentPrice>{value}.',
+    examples=[20],
+)
+MAX_PRICE_QUERY = Query(
+    default=None,
+    ge=0,
+    alias='maxPrice',
+    description='Maximum current price. Sent upstream as the numeric condition CurrentPrice<{value}.',
+    examples=[50],
+)
+
 
 @router.get('/health')
 def impact_health() -> dict[str, str]:
@@ -239,6 +277,11 @@ async def get_impact_catalog_items(
     limit: int = Query(default=20, ge=1, le=100, description='Page size for list pagination'),
     offset: int = Query(default=0, ge=0, description='Offset for list pagination'),
     next_page_id: str | None = Query(default=None, alias='nextPageId', description='Impact cursor token (mapped to upstream AfterId)'),
+    sort_by: str | None = SORT_BY_QUERY,
+    sort_order: str | None = SORT_ORDER_QUERY,
+    min_discount: float | None = MIN_DISCOUNT_QUERY,
+    min_price: float | None = MIN_PRICE_QUERY,
+    max_price: float | None = MAX_PRICE_QUERY,
     credentials: HTTPBasicCredentials | None = Depends(impact_basic),
 ) -> ApiResponse[dict]:
     account_sid, auth_token = _resolve_impact_credentials(credentials)
@@ -253,6 +296,11 @@ async def get_impact_catalog_items(
             limit=limit,
             offset=offset,
             after_id=next_page_id,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            min_discount=min_discount,
+            min_price=min_price,
+            max_price=max_price,
         )
         return ApiResponse(data=payload)
     except HTTPStatusError as exc:
@@ -280,6 +328,11 @@ async def get_impact_catalog_items_by_keyword(
     keyword: str = Query(..., min_length=1),
     limit: int = Query(default=20, ge=1, le=100, description='Page size'),
     next_page_id: str | None = Query(default=None, alias='nextPageId', description='Impact cursor token (mapped to upstream AfterId)'),
+    sort_by: str | None = SORT_BY_QUERY,
+    sort_order: str | None = SORT_ORDER_QUERY,
+    min_discount: float | None = MIN_DISCOUNT_QUERY,
+    min_price: float | None = MIN_PRICE_QUERY,
+    max_price: float | None = MAX_PRICE_QUERY,
     credentials: HTTPBasicCredentials | None = Depends(impact_basic),
 ) -> ApiResponse[dict]:
     account_sid, auth_token = _resolve_impact_credentials(credentials)
@@ -293,6 +346,11 @@ async def get_impact_catalog_items_by_keyword(
             keyword=normalized_keyword,
             limit=limit,
             after_id=next_page_id,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            min_discount=min_discount,
+            min_price=min_price,
+            max_price=max_price,
         )
         return ApiResponse(data=payload)
     except HTTPStatusError as exc:
@@ -320,6 +378,11 @@ async def search_impact_items(
     limit: int = Query(default=20, ge=1, le=100, description='Page size for list pagination'),
     offset: int = Query(default=0, ge=0, description='Offset for list pagination'),
     next_page_id: str | None = Query(default=None, alias='nextPageId', description='Impact cursor token (mapped to upstream AfterId)'),
+    sort_by: str | None = SORT_BY_QUERY,
+    sort_order: str | None = SORT_ORDER_QUERY,
+    min_discount: float | None = MIN_DISCOUNT_QUERY,
+    min_price: float | None = MIN_PRICE_QUERY,
+    max_price: float | None = MAX_PRICE_QUERY,
     credentials: HTTPBasicCredentials | None = Depends(impact_basic),
 ) -> ApiResponse[dict]:
     account_sid, auth_token = _resolve_impact_credentials(credentials)
@@ -333,6 +396,11 @@ async def search_impact_items(
             limit=limit,
             offset=offset,
             after_id=next_page_id,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            min_discount=min_discount,
+            min_price=min_price,
+            max_price=max_price,
         )
         return ApiResponse(data=payload)
     except HTTPStatusError as exc:

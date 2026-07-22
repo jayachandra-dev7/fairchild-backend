@@ -104,6 +104,19 @@ Next, we can add each platform router from your cURL commands one-by-one.
 - Uses token saved from `POST /api/v1/cj/authorize`
 - Content type sent upstream: `application/graphql`
 
+### CJ: Product Filtering and Sorting
+Additional body fields on `POST /api/v1/cj/ads/products/query`:
+
+- `discount_percentage` (`0`–`100`) — a **minimum** threshold, not an exact match.
+- `low_price`, `high_price` — price band.
+- `brand` — single brand name.
+- `sort_by` — `LAST_UPDATED` or `PRICE`. CJ's enum has no discount sort; use `discount_percentage` to filter, then sort the returned page client-side.
+- `sort_order` — `ASC` or `DESC`.
+
+Sorting and cursor pagination are mutually exclusive: CJ rejects any query whose *selection set* contains `nextPage` once sorting is requested, so setting `sort_by` drops `nextPage` from the selection and the response reports `nextPage: null`.
+
+`offset` must stay `0` when paging — CJ only supports cursor pagination through the `page` token.
+
 ## Impact: Campaigns
 - Backend route: `GET /api/v1/impact/campaigns`
 - Backend route: `GET /api/v1/impact/campaigns/{campaign_id}`
@@ -128,6 +141,17 @@ Next, we can add each platform router from your cURL commands one-by-one.
 - Optional query param: `keyword`
 - Pagination params supported: `limit` (default `20`), `offset` (default `0`)
 - Backend route: `GET /api/v1/impact/media-properties`
+
+### Impact: Server-side Filtering and Sorting
+Available on `GET /catalogs/{catalog_id}/items`, `GET /catalogs/{catalog_id}/items/by-keyword` and `GET /catalogs/item-search`:
+
+- `sortBy` — one of `DiscountPercentage`, `CurrentPrice`, `Name`, `CatalogItemId`, `Category`, `Manufacturer`. Any other value is rejected with `422` (`INVALID_SORT_FIELD`) and never forwarded, because Impact answers unknown sort fields with an opaque `400`.
+- `sortOrder` — `ASC` or `DESC`.
+- `minDiscount`, `minPrice`, `maxPrice` — combined into upstream `Query` as AND-joined numeric conditions, e.g. `DiscountPercentage>30 AND CurrentPrice>20 AND CurrentPrice<50`.
+
+Impact's `Query` parser accepts **numeric conditions only**. String conditions such as `Name~boots` or `StockAvailability=InStock` fail upstream with `Failed to parse expression`, so text matching continues to go through `keyword`.
+
+There is no promotions filter: `PromotionIds=!=null` returns `400 Invalid search param(s): PromotionIds` on `ItemSearch` and is silently ignored on `Catalogs/{id}/Items`, while `Query=PromotionIds!=null` returns zero rows with `@total=-1`.
 
 ## Impact: Tracking Links
 - Backend route: `POST /api/v1/impact/programs/{program_id}/tracking-links`

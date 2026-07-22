@@ -5,6 +5,10 @@ import httpx
 from app.schemas.cj.ads_query import CJAdsProductsQueryRequest
 
 
+def _format_number(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
 class CJAdsQueryService:
     base_url = 'https://ads.api.cj.com/query'
 
@@ -24,7 +28,16 @@ class CJAdsQueryService:
         async with httpx.AsyncClient(timeout=45.0) as client:
             response = await client.post(cls.base_url, headers=headers, content=graphql_query)
             response.raise_for_status()
-            return response.json()
+            payload = response.json()
+
+        if request.sort_by:
+            # Sorting and cursor pagination are mutually exclusive upstream, so the sorted
+            # query cannot ask for nextPage. Report explicitly that there is no further page.
+            products = payload.get('data', {}).get('products') if isinstance(payload, dict) else None
+            if isinstance(products, dict):
+                products['nextPage'] = None
+
+        return payload
 
     @classmethod
     def _build_products_query(cls, request: CJAdsProductsQueryRequest) -> str:
@@ -51,6 +64,24 @@ class CJAdsQueryService:
             partner_ids_csv = ', '.join(f'"{item}"' for item in partner_ids)
             query_parts.append(f'partnerIds: [{partner_ids_csv}]')
 
+        if request.discount_percentage is not None:
+            query_parts.append(f'discountPercentage: {_format_number(request.discount_percentage)}')
+
+        if request.low_price is not None:
+            query_parts.append(f'lowPrice: {_format_number(request.low_price)}')
+
+        if request.high_price is not None:
+            query_parts.append(f'highPrice: {_format_number(request.high_price)}')
+
+        if request.brand and request.brand.strip():
+            query_parts.append(f'brand: "{request.brand.strip()}"')
+
+        if request.sort_by:
+            query_parts.append(f'sortBy: {request.sort_by}')
+
+        if request.sort_order:
+            query_parts.append(f'sortOrder: {request.sort_order}')
+
         query_parts.append(f'limit: {request.limit}')
         if request.page and request.page.strip():
             query_parts.append(f'page: "{request.page.strip()}"')
@@ -58,11 +89,15 @@ class CJAdsQueryService:
             query_parts.append(f'offset: {request.offset}')
         args_block = ', '.join(query_parts)
 
+        # CJ 400s on `nextPage` appearing anywhere in the selection set once sorting is requested,
+        # regardless of the arguments used, so drop the field entirely when sorting.
+        page_fields = 'totalCount count limit ' if request.sort_by else 'totalCount count limit nextPage '
+
         return (
             '{ products('
             f'{args_block}'
             ') { '
-            'totalCount count limit nextPage '
+            f'{page_fields}'
             'resultList { '
             'advertiserId catalogId advertiserName id title description imageLink link '
             'price { amount currency } '

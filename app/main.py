@@ -1,3 +1,5 @@
+import json
+
 from fastapi import FastAPI
 from fastapi import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
@@ -42,10 +44,14 @@ async def http_exception_handler(_, exc: FastAPIHTTPException) -> JSONResponse:
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_, exc: RequestValidationError) -> JSONResponse:
+    # Pydantic v2 puts the raw exception object in each error's `ctx` when a custom
+    # validator raises. `default=str` keeps those (and any other exotic value) encodable
+    # so validation failures stay 422 instead of falling through to the 500 handler.
+    details = json.loads(json.dumps(exc.errors(), default=str))
     error = ErrorDetail(
         code='VALIDATION_ERROR',
         message='Request validation failed.',
-        details=exc.errors(),
+        details=details,
         retryable=False,
     )
     body = ApiResponse(success=False, error=error).model_dump(exclude_none=True)
