@@ -1,10 +1,12 @@
 from io import BytesIO
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.main import app
 from app.services.platform_auth_service import platform_auth_service
+from app.utils.image_validation import ImageValidationError, validate_image_bytes
 
 
 client = TestClient(app)
@@ -17,21 +19,26 @@ def _png_bytes(color: tuple[int, int, int]) -> bytes:
     return output.getvalue()
 
 
-def test_black_image_detection_rejects_request() -> None:
-    platform_auth_service.set_token('renderform', 'dummy-token')
+def test_low_variance_image_is_tolerated_not_rejected() -> None:
+    """Dark/low-variance but decodable images (e.g. white-background product shots) are valid.
+    The brightness/variance check is a logged warning now, not a hard failure."""
     black_png = _png_bytes((0, 0, 0))
+    white_png = _png_bytes((255, 255, 255))
 
-    response = client.post(
-        '/api/v1/renderform/render/upload',
-        files={'image': ('black.png', black_png, 'image/png')},
-    )
+    # Neither should raise: both decode cleanly even though variance is near zero.
+    validate_image_bytes(image_bytes=black_png, content_type='image/png')
+    validate_image_bytes(image_bytes=white_png, content_type='image/png')
 
-    assert response.status_code == 422
-    payload = response.json()
-    assert payload['success'] is False
-    assert payload['error']['code'] == 'IMAGE_INVALID_OR_BLANK'
-    assert payload['error']['retryable'] is False
-    assert payload['error']['step'] == 'renderform_render'
+
+def test_undecodable_bytes_still_rejected() -> None:
+    with pytest.raises(ImageValidationError) as excinfo:
+        validate_image_bytes(image_bytes=b'not-an-image', content_type='image/png')
+    assert excinfo.value.code == 'IMAGE_INVALID_OR_BLANK'
+
+
+def test_non_image_content_type_still_rejected() -> None:
+    with pytest.raises(ImageValidationError):
+        validate_image_bytes(image_bytes=_png_bytes((120, 120, 120)), content_type='text/html')
 
 
 def test_url_like_keyword_rejected_with_standard_error() -> None:

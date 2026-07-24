@@ -35,6 +35,8 @@ async def claude_generate(body: ClaudeGenerateRequest) -> ApiResponse[ClaudeGene
             prompt=body.prompt,
             max_tokens=body.max_tokens,
             temperature=body.temperature,
+            system=body.system,
+            response_json=body.response_json,
         )
         return ApiResponse(
             data=ClaudeGenerateResponse(

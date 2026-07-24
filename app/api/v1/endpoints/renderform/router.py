@@ -1,5 +1,6 @@
 from typing import Any
 import asyncio
+import logging
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from httpx import HTTPError, HTTPStatusError
@@ -12,6 +13,8 @@ from app.services.renderform.service import RenderFormService
 from app.utils.image_validation import ImageValidationError, fetch_and_validate_image_url, validate_image_bytes
 from app.utils.pipeline_errors import raise_pipeline_error
 from app.utils.retry import run_with_retry
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix='/renderform', tags=['RenderForm'])
 MAX_BLANK_RENDER_RETRIES = 2
@@ -80,34 +83,18 @@ async def renderform_render(
 ) -> ApiResponse[Any]:
     api_key = _resolve_renderform_api_key()
     completed_steps: list[str] = []
+    # Source-image pre-validation is a best-effort courtesy check only. RenderForm fetches the
+    # image itself, so a failure here (CDN blocking our agent, timeout, transient HTTP error, or
+    # a low-variance-but-valid product shot) must NOT fail the request before RenderForm has even
+    # been tried. Log and proceed with the original image_src; only RenderForm's own rejection surfaces.
     if body.image_src.strip().lower().startswith(('http://', 'https://')):
         try:
-            await run_with_retry(
-                step='renderform_render',
-                operation=lambda: fetch_and_validate_image_url(body.image_src.strip()),
-            )
-        except ImageValidationError as exc:
-            raise_pipeline_error(
-                status_code=422,
-                code='IMAGE_INVALID_OR_BLANK',
-                message=exc.message,
-                details=exc.details,
-                retryable=False,
-                step='renderform_render',
-                completed_steps=completed_steps,
-                failed_step='renderform_render',
-            )
+            await fetch_and_validate_image_url(body.image_src.strip())
         except Exception as exc:  # noqa: BLE001
-            raise_pipeline_error(
-                status_code=502,
-                code='RENDER_TIMEOUT',
-                message='Image validation failed due to temporary upstream/network issue.',
-                details={'error': exc.__class__.__name__},
-                retryable=True,
-                step='renderform_render',
-                completed_steps=completed_steps,
-                failed_step='renderform_render',
-                can_retry_from_step='renderform_render',
+            logger.warning(
+                'Source image pre-validation failed for %s (%s); proceeding to RenderForm anyway',
+                body.image_src.strip(),
+                exc.__class__.__name__,
             )
 
     data = {

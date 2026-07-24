@@ -17,6 +17,8 @@ class ClaudeGenerateRequest(BaseModel):
     model_candidates: list[str] = Field(default_factory=lambda: DEFAULT_MODEL_CANDIDATES.copy(), alias='modelCandidates')
     max_tokens: int = Field(default=500, ge=1, le=4096, alias='maxTokens')
     temperature: float = Field(default=0.7, ge=0, le=1)
+    system: str | None = None
+    response_json: bool = Field(default=False, alias='responseJson')
 
 
 class ClaudeGenerateResponse(BaseModel):
