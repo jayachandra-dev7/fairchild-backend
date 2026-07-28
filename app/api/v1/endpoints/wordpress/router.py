@@ -5,6 +5,7 @@ from httpx import HTTPError, HTTPStatusError
 
 from app.schemas.common import ApiResponse, ErrorDetail
 from app.schemas.wordpress.auth import WordPressAuthorizeRequest, WordPressAuthorizeResponse
+from app.schemas.wordpress.post import WordPressPostCreateRequest
 from app.schemas.wordpress.product import WooProductCreateRequest
 from app.services.wordpress.service import WordPressService
 from app.services.platform_auth_service import platform_auth_service
@@ -190,6 +191,53 @@ async def wordpress_create_product(
             completed_steps=completed_steps,
             failed_step='wordpress_create_product',
             can_retry_from_step='wordpress_create_product',
+        )
+
+
+@router.post('/posts', response_model=ApiResponse[Any])
+async def wordpress_create_post(
+    body: WordPressPostCreateRequest,
+) -> ApiResponse[Any]:
+    credentials = _resolve_wordpress_credentials()
+    completed_steps = ['renderform_render', 'wordpress_media_upload']
+
+    try:
+        payload = await run_with_retry(
+            step='wordpress_create_post',
+            operation=lambda: WordPressService.create_post(
+                domain=credentials['domain'],
+                wc_consumer_key=credentials['wc_consumer_key'],
+                wc_consumer_secret=credentials['wc_consumer_secret'],
+                payload=body,
+            ),
+        )
+        completed_steps.append('wordpress_create_post')
+        return ApiResponse(data=payload)
+    except HTTPStatusError as exc:
+        code = 'UPSTREAM_RATE_LIMITED' if exc.response.status_code == 429 else 'WORDPRESS_POST_CREATE_FAILED'
+        retryable = exc.response.status_code in {429, 500, 502, 503, 504}
+        raise_pipeline_error(
+            status_code=exc.response.status_code,
+            code=code,
+            message='WordPress blog post creation failed.',
+            details={'status_code': exc.response.status_code},
+            retryable=retryable,
+            step='wordpress_create_post',
+            completed_steps=completed_steps,
+            failed_step='wordpress_create_post',
+            can_retry_from_step='wordpress_create_post' if retryable else None,
+        )
+    except HTTPError as exc:
+        raise_pipeline_error(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            code='WORDPRESS_POST_CREATE_FAILED',
+            message='WordPress blog post creation failed due to network timeout/connectivity issue.',
+            details={'error': exc.__class__.__name__},
+            retryable=True,
+            step='wordpress_create_post',
+            completed_steps=completed_steps,
+            failed_step='wordpress_create_post',
+            can_retry_from_step='wordpress_create_post',
         )
 
 

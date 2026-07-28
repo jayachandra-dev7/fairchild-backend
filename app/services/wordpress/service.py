@@ -3,6 +3,7 @@ from typing import Any
 import httpx
 from fastapi import UploadFile
 
+from app.schemas.wordpress.post import WordPressPostCreateRequest
 from app.schemas.wordpress.product import WooProductCreateRequest
 
 
@@ -105,6 +106,29 @@ class WordPressService:
                 auth=(wc_consumer_key, wc_consumer_secret),
                 headers=headers,
                 json=payload.model_dump(),
+            )
+            response.raise_for_status()
+            return response.json()
+
+    @classmethod
+    async def create_post(
+        cls,
+        *,
+        domain: str,
+        wc_consumer_key: str,
+        wc_consumer_secret: str,
+        payload: WordPressPostCreateRequest,
+    ) -> Any:
+        base = cls._normalize_domain(domain)
+        url = f'{base}/wp-json/wp/v2/posts'
+        headers = {'Content-Type': 'application/json'}
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                url,
+                auth=(wc_consumer_key, wc_consumer_secret),
+                headers=headers,
+                json=payload.model_dump(exclude_none=True),
             )
             response.raise_for_status()
             return response.json()

@@ -73,6 +73,7 @@ uvicorn app.main:app --reload
 - `POST /api/v1/wordpress/authorize`
 - `POST /api/v1/wordpress/media/upload`
 - `POST /api/v1/wordpress/products`
+- `POST /api/v1/wordpress/posts`
 - `GET /api/v1/metricool/health`
 - `POST /api/v1/metricool/authorize`
 - `GET /api/v1/metricool/profiles`
@@ -191,6 +192,11 @@ There is no promotions filter: `PromotionIds=!=null` returns `400 Invalid search
 - Auth format: Basic Auth using `wc_consumer_key:wc_consumer_secret`
 - Product body supports sample keys: `name`, `type`, `status`, `featured`, `catalog_visibility`, `description`, `short_description`, `external_url`, `button_text`, `regular_price`, `sale_price`, `images`, `meta_data`
 - Product body also supports `categories` as WooCommerce expects: `[{ "id": <category_id> }]`
+- Backend route: `POST /api/v1/wordpress/posts` (create a blog post)
+- Upstream URL: `https://<domain>/wp-json/wp/v2/posts` (WordPress core REST API, not WooCommerce)
+- Auth format: Basic Auth using `wc_consumer_key:wc_consumer_secret` (authorize with the WordPress username as `wc_consumer_key` and an application password as `wc_consumer_secret`)
+- Required body fields: `title`, `content` (HTML)
+- Optional body fields: `status` (default `draft`; pass `publish` to go live), `categories` as a flat ID array `[1]` (**not** `[{ "id": 1 }]`), `tags` as a flat ID array, `excerpt`, `slug`, `featured_media` (media ID from `/wordpress/media/upload`)
 - Backend route: `GET /api/v1/wordpress/products/categories`
 - Upstream URL: `https://<domain>/wp-json/wc/v3/products/categories`
 - Auth format: Basic Auth using `wc_consumer_key:wc_consumer_secret`
