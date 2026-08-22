@@ -79,3 +79,16 @@ Applied to:
 - `POST /api/v1/cj/ads/products/query` (`keywords[]`)
 - `GET /api/v1/impact/catalogs/{catalog_id}/items` (`keyword`)
 - `GET /api/v1/impact/catalogs/item-search` (`keyword`)
+
+## Impact Advertiser Scoping
+
+Impact's `GET /Mediapartners/{sid}/Catalogs` listing returns an empty set (`@total: 0`) for this
+account even though the catalog items themselves are reachable, so the catalog list cannot be used
+to build an advertiser picker. Use `GET /api/v1/impact/campaigns` for the advertiser list and scope
+item queries with the campaign id:
+
+- `GET /api/v1/impact/catalogs/item-search?campaignIds=16358,9453`
+
+`campaignIds` accepts a comma-separated list or a repeated param, and is forwarded upstream as the
+`Query` condition `CampaignId IN (...)` — Impact rejects `CampaignId` as a standalone search param.
+Non-numeric ids are rejected with `422` / `INVALID_CAMPAIGN_ID`.

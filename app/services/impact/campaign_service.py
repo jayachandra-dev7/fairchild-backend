@@ -101,6 +101,7 @@ class ImpactCampaignService:
         min_discount: float | None = None,
         min_price: float | None = None,
         max_price: float | None = None,
+        campaign_ids: list[str] | None = None,
         step: str = 'impact_item_search',
     ) -> dict[str, Any]:
         params: dict[str, Any] = {}
@@ -133,6 +134,26 @@ class ImpactCampaignService:
         # `Name~boots` or `StockAvailability=InStock` fail upstream with
         # {"Status":"ERROR","Message":"Failed to parse expression"}, so text matching stays on `keyword`.
         conditions: list[str] = []
+        # `CampaignId` is rejected as a standalone search param ("Invalid search param(s): CampaignId")
+        # but is accepted inside Query, which is the only working way to scope items to an advertiser.
+        if campaign_ids:
+            normalized_ids: list[str] = []
+            for raw_id in campaign_ids:
+                candidate = str(raw_id).strip()
+                if not candidate:
+                    continue
+                if not candidate.isdigit():
+                    raise_pipeline_error(
+                        status_code=422,
+                        code='INVALID_CAMPAIGN_ID',
+                        message='campaignIds must be numeric Impact campaign ids.',
+                        retryable=False,
+                        step=step,
+                    )
+                if candidate not in normalized_ids:
+                    normalized_ids.append(candidate)
+            if normalized_ids:
+                conditions.append(f"CampaignId IN ({','.join(normalized_ids)})")
         if min_discount is not None:
             conditions.append(f'DiscountPercentage>{_format_number(min_discount)}')
         if min_price is not None:
@@ -253,6 +274,7 @@ class ImpactCampaignService:
         min_discount: float | None = None,
         min_price: float | None = None,
         max_price: float | None = None,
+        campaign_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         params = cls._build_pagination_params(limit=limit, offset=offset, after_id=after_id)
         if keyword:
@@ -264,6 +286,7 @@ class ImpactCampaignService:
                 min_discount=min_discount,
                 min_price=min_price,
                 max_price=max_price,
+                campaign_ids=campaign_ids,
                 step='impact_item_search',
             )
         )

@@ -50,6 +50,23 @@ MAX_PRICE_QUERY = Query(
     description='Maximum current price. Sent upstream as the numeric condition CurrentPrice<{value}.',
     examples=[50],
 )
+CAMPAIGN_IDS_QUERY = Query(
+    default=None,
+    alias='campaignIds',
+    description=(
+        'Restrict results to these Impact campaign (advertiser) ids. Repeat the param or pass a '
+        'comma-separated list. Sent upstream as the Query condition CampaignId IN (...).'
+    ),
+    examples=[['16358', '9453']],
+)
+
+
+def _split_campaign_ids(values: list[str] | None) -> list[str] | None:
+    """Accept both ?campaignIds=1&campaignIds=2 and ?campaignIds=1,2."""
+    if not values:
+        return None
+    parts = [part.strip() for value in values for part in value.split(',')]
+    return [part for part in parts if part] or None
 
 
 @router.get('/health')
@@ -383,6 +400,7 @@ async def search_impact_items(
     min_discount: float | None = MIN_DISCOUNT_QUERY,
     min_price: float | None = MIN_PRICE_QUERY,
     max_price: float | None = MAX_PRICE_QUERY,
+    campaign_ids: list[str] | None = CAMPAIGN_IDS_QUERY,
     credentials: HTTPBasicCredentials | None = Depends(impact_basic),
 ) -> ApiResponse[dict]:
     account_sid, auth_token = _resolve_impact_credentials(credentials)
@@ -401,6 +419,7 @@ async def search_impact_items(
             min_discount=min_discount,
             min_price=min_price,
             max_price=max_price,
+            campaign_ids=_split_campaign_ids(campaign_ids),
         )
         return ApiResponse(data=payload)
     except HTTPStatusError as exc:

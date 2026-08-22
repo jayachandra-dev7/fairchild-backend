@@ -167,3 +167,40 @@ def test_invalid_cj_sort_by_returns_422_envelope() -> None:
     assert payload['success'] is False
     assert payload['error']['code'] == 'VALIDATION_ERROR'
     assert any('sort_by' in str(item.get('loc', '')) for item in payload['error']['details'])
+
+
+# --- Impact: campaign (advertiser) scoping ---------------------------------------------
+
+
+def test_campaign_ids_become_a_query_condition() -> None:
+    params = ImpactCampaignService._build_filter_params(campaign_ids=['16358', '9453'])
+
+    assert params['Query'] == 'CampaignId IN (16358,9453)'
+
+
+def test_campaign_ids_are_deduped_trimmed_and_combined_with_bounds() -> None:
+    params = ImpactCampaignService._build_filter_params(
+        campaign_ids=[' 16358 ', '16358', ''],
+        min_price=20,
+    )
+
+    assert params['Query'] == 'CampaignId IN (16358) AND CurrentPrice>20'
+
+
+def test_campaign_ids_omitted_when_empty() -> None:
+    assert 'Query' not in ImpactCampaignService._build_filter_params(campaign_ids=[])
+
+
+def test_non_numeric_campaign_id_is_rejected() -> None:
+    with pytest.raises(HTTPException) as excinfo:
+        ImpactCampaignService._build_filter_params(campaign_ids=['Frances Valentine'])
+
+    assert excinfo.value.status_code == 422
+
+
+def test_item_search_accepts_comma_separated_campaign_ids() -> None:
+    from app.api.v1.endpoints.impact.router import _split_campaign_ids
+
+    assert _split_campaign_ids(['16358,9453', '2623']) == ['16358', '9453', '2623']
+    assert _split_campaign_ids(None) is None
+    assert _split_campaign_ids(['', ' ']) is None
