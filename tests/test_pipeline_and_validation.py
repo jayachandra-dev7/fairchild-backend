@@ -41,6 +41,43 @@ def test_non_image_content_type_still_rejected() -> None:
         validate_image_bytes(image_bytes=_png_bytes((120, 120, 120)), content_type='text/html')
 
 
+def _png_bytes_with_inset(background: tuple[int, int, int], inset_ratio: float = 0.4) -> bytes:
+    """A solid background with a distinct colored square in the middle, simulating a product
+    photo on a plain background (as opposed to a fully blank canvas)."""
+    size = 64
+    image = Image.new('RGB', (size, size), color=background)
+    inset = int(size * inset_ratio)
+    offset = (size - inset) // 2
+    for x in range(offset, offset + inset):
+        for y in range(offset, offset + inset):
+            image.putpixel((x, y), (30, 140, 220))
+    output = BytesIO()
+    image.save(output, format='PNG')
+    return output.getvalue()
+
+
+def test_strict_mode_tolerates_low_variance_but_still_accepts_by_default() -> None:
+    """Non-strict callers (the source-image pre-check) keep today's lenient behavior even for a
+    solid-color image — only strict callers (the rendered-output check) enforce the blank-canvas
+    rule. This documents the split so the two call sites don't silently converge later."""
+    solid_png = _png_bytes((255, 255, 255))
+    validate_image_bytes(image_bytes=solid_png, content_type='image/png', strict=False)
+
+
+def test_strict_mode_rejects_uniform_blank_canvas() -> None:
+    for color in [(255, 255, 255), (0, 0, 0), (128, 128, 128)]:
+        with pytest.raises(ImageValidationError) as excinfo:
+            validate_image_bytes(image_bytes=_png_bytes(color), content_type='image/png', strict=True)
+        assert excinfo.value.code == 'IMAGE_INVALID_OR_BLANK'
+
+
+def test_strict_mode_accepts_image_with_visible_product_region() -> None:
+    for background in [(255, 255, 255), (0, 0, 0)]:
+        product_png = _png_bytes_with_inset(background)
+        # Should not raise: the inset breaks the single-color majority below the threshold.
+        validate_image_bytes(image_bytes=product_png, content_type='image/png', strict=True)
+
+
 def test_url_like_keyword_rejected_with_standard_error() -> None:
     platform_auth_service.set_credentials(
         'impact',

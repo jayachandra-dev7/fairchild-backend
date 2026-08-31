@@ -121,7 +121,7 @@ async def renderform_render(
             try:
                 await run_with_retry(
                     step='renderform_render',
-                    operation=lambda: fetch_and_validate_image_url(rendered_image_url),
+                    operation=lambda: fetch_and_validate_image_url(rendered_image_url, strict=True),
                 )
                 validation_error_details = None
                 break
@@ -240,7 +240,7 @@ async def renderform_render_upload(
             try:
                 await run_with_retry(
                     step='renderform_render',
-                    operation=lambda: fetch_and_validate_image_url(rendered_image_url),
+                    operation=lambda: fetch_and_validate_image_url(rendered_image_url, strict=True),
                 )
                 validation_error_details = None
                 break

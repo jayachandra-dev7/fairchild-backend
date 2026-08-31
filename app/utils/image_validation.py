@@ -24,11 +24,30 @@ class ImageValidationError(Exception):
 BLACK_MEAN_THRESHOLD = 10.0
 LOW_VARIANCE_THRESHOLD = 15.0
 
+# Above this share, one color dominates the whole canvas. A legitimate product photo
+# — even shot on white — has enough product/shadow/edge pixels to break a 92%+ single-color
+# majority; a template that dropped the photo layer renders text on an untouched background,
+# which does not. Unlike a plain brightness/variance check, this catches ANY blank background
+# color (white, black, brand gray, ...) with one threshold.
+DOMINANT_COLOR_MAX_SHARE = 0.92
+BLANK_CANVAS_SAMPLE_SIZE = (64, 64)
+
+
+def _dominant_color_share(image: Image.Image) -> float:
+    sample = image.convert('RGB').resize(BLANK_CANVAS_SAMPLE_SIZE)
+    colors = sample.getcolors(maxcolors=BLANK_CANVAS_SAMPLE_SIZE[0] * BLANK_CANVAS_SAMPLE_SIZE[1])
+    if not colors:
+        return 0.0
+    total_pixels = BLANK_CANVAS_SAMPLE_SIZE[0] * BLANK_CANVAS_SAMPLE_SIZE[1]
+    dominant_count = max(count for count, _ in colors)
+    return dominant_count / total_pixels
+
 
 def validate_image_bytes(
     *,
     image_bytes: bytes,
     content_type: str,
+    strict: bool = False,
 ) -> None:
     if not content_type.lower().startswith('image/'):
         raise ImageValidationError(
@@ -65,11 +84,25 @@ def validate_image_bytes(
             variance,
         )
 
+    dominant_share = _dominant_color_share(image)
+    if dominant_share > DOMINANT_COLOR_MAX_SHARE:
+        if strict:
+            raise ImageValidationError(
+                code='IMAGE_INVALID_OR_BLANK',
+                message='Rendered image has no visible product photo (background is one uniform color).',
+                details={'dominantColorShare': round(dominant_share, 4)},
+            )
+        logger.warning(
+            'Image dominant color share above threshold but accepted in non-strict mode (share=%.3f)',
+            dominant_share,
+        )
+
 
 async def fetch_and_validate_image_url(
     image_url: str,
     *,
     timeout: float = 20.0,
+    strict: bool = False,
 ) -> tuple[bytes, str]:
     headers = {'User-Agent': BROWSER_USER_AGENT}
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
@@ -85,5 +118,5 @@ async def fetch_and_validate_image_url(
         get_resp = await client.get(image_url)
         get_resp.raise_for_status()
         resolved_type = get_resp.headers.get('content-type', content_type or 'application/octet-stream')
-        validate_image_bytes(image_bytes=get_resp.content, content_type=resolved_type)
+        validate_image_bytes(image_bytes=get_resp.content, content_type=resolved_type, strict=strict)
         return get_resp.content, resolved_type
