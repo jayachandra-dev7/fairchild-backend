@@ -1,0 +1,563 @@
+import asyncio
+import io
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import pytest
+from PIL import Image
+
+from app.core.config import get_settings
+from app.db import automation_store
+from app.schemas.automation import Candidate, ProductAutomationSettings, ScheduleSettings, parse_keywords
+from app.services.automation import categories, claude_review, filters, product_job, sourcing
+from app.workers.scheduler import is_due
+
+
+@pytest.fixture(autouse=True)
+def temp_db(tmp_path, monkeypatch):
+    async def plain_keywords(leaf):
+        return [leaf['name']]
+
+    monkeypatch.setattr(claude_review, 'suggest_keywords', plain_keywords)
+    monkeypatch.setattr(automation_store, 'DB_PATH', tmp_path / 'auto.db')
+
+
+RAW = [
+    {'id': 1, 'name': 'Animals &amp; Pet Supplies', 'slug': 'a', 'parent': 0},
+    {'id': 2, 'name': 'Cat Supplies', 'slug': 'b', 'parent': 1},
+    {'id': 3, 'name': 'Cat Food', 'slug': 'c', 'parent': 2},
+    {'id': 4, 'name': 'Cat Toys', 'slug': 'd', 'parent': 2},
+    {'id': 5, 'name': 'Uncategorized', 'slug': 'u', 'parent': 0},
+]
+
+
+def test_build_snapshot_tree_and_leaves():
+    snap = categories.build_snapshot(RAW)
+    by_id = {c['id']: c for c in snap['categories']}
+    assert by_id[1]['name'] == 'Animals & Pet Supplies'  # entity decoded
+    assert by_id[3]['path'] == 'Animals & Pet Supplies > Cat Supplies > Cat Food'
+    assert by_id[3]['path_ids'] == [1, 2, 3] and by_id[3]['depth'] == 3
+    assert {c['id'] for c in snap['categories'] if c['is_leaf']} == {3, 4, 5}
+    assert snap['leaf_count'] == 3
+
+
+def test_snapshot_file_is_loadable():
+    snap = categories.load_snapshot(force=True)
+    assert snap['total'] == len(snap['categories']) > 1000
+    assert all(c['is_leaf'] == (c['id'] not in {x['parent'] for x in snap['categories']}) for c in snap['categories'][:200])
+
+
+def cand(**kw):
+    base = dict(source='impact', source_id='x1', title='Soft Cat Bed', buy_url='https://b', image_url='https://i', price=100.0, sale_price=70.0, discount=30.0)
+    base.update(kw)
+    return Candidate(**base)
+
+
+def test_filters_price_discount_keywords_and_dedup():
+    cfg = ProductAutomationSettings(min_discount=20, min_price=5, max_price=500, ignore_keywords='gun, vape')
+    ok = cand(source_id='ok')
+    pricey = cand(source_id='p', sale_price=900.0, price=1200.0, discount=25.0)
+    shallow = cand(source_id='s', price=100.0, sale_price=95.0, discount=5.0)
+    banned = cand(source_id='b', title='Toy gun for cats')
+    oos = cand(source_id='o', in_stock=False)
+    fake = cand(source_id='f', price=1000.0, sale_price=50.0, discount=95.0)
+    automation_store.record_product(source='impact', source_id='seen', wp_product_id=1, media_id=1, category_id=3, name='n', permalink='', image_url='', price='1', sale_price='1')
+    seen = cand(source_id='seen')
+    kept, rejected = filters.filter_and_rank([ok, pricey, shallow, banned, oos, fake, seen, ok], cfg)
+    assert [c.source_id for c in kept] == ['ok']
+    assert rejected['already posted'] == 1
+
+
+def test_hard_price_ceiling_even_if_setting_is_huge():
+    cfg = ProductAutomationSettings.model_construct(**{**ProductAutomationSettings().model_dump(), 'max_price': 99999.0})
+    assert filters.reject_reason(cand(sale_price=2500.0, price=3500.0, discount=29.0), cfg, []) is not None
+
+
+def test_parse_keywords():
+    assert parse_keywords('Gun, vape\nammo; GUN') == ['gun', 'vape', 'ammo']
+
+
+def test_normalizers():
+    leaf = {'name': 'Cat Food', 'path': 'Animals > Cat Food'}
+    imp = sourcing.normalize_impact(
+        {'Id': 'p1', 'Name': 'Cat Food 5lb', 'CurrentPrice': '17.99', 'OriginalPrice': '20.99', 'DiscountPercentage': '14', 'StockAvailability': 'InStock',
+         'Category': 'Animals > Cat Food > Dry', 'Url': 'u', 'ImageUrl': 'i', 'CampaignName': 'Petco'}, leaf)
+    assert imp and imp.discount == 14 and imp.in_stock and imp.relevance >= 2
+    assert sourcing.normalize_impact({'Id': 'x', 'Name': 'n', 'CurrentPrice': '10', 'OriginalPrice': '10'}, leaf) is None
+    cj = sourcing.normalize_cj(
+        {'id': '9', 'advertiserId': '1', 'title': 'Cat Food', 'price': {'amount': '20'}, 'salePrice': {'amount': '15'},
+         'linkCode': {'clickUrl': 'c'}, 'imageLink': 'i', 'availability': 'IN_STOCK'}, leaf)
+    assert cj and cj.discount == 25.0 and cj.source_id == '1:9' and cj.buy_url == 'c'
+
+
+def test_cj_keyword_cannot_break_graphql():
+    assert '"' not in sourcing._clean_keyword('Men\'s "Classic" Watches')
+
+
+def test_extract_json_variants():
+    assert claude_review.extract_json('```json\n{"a": 1}\n```') == {'a': 1}
+    assert claude_review.extract_json('Sure! {"a": {"b": "}"}} trailing') == {'a': {'b': '}'}}
+    with pytest.raises(ValueError):
+        claude_review.extract_json('no json here')
+
+
+def test_is_due_logic():
+    tz = ZoneInfo('America/Denver')
+    cfg = ScheduleSettings(enabled=True, daily_time='09:00', timezone='America/Denver')
+    assert not is_due(cfg, datetime(2026, 1, 1, 8, 59, tzinfo=tz), [])
+    assert is_due(cfg, datetime(2026, 1, 1, 9, 0, tzinfo=tz), [])
+    assert is_due(cfg, datetime(2026, 1, 1, 15, 0, tzinfo=tz), [])  # catch-up after a restart
+    assert not is_due(cfg, datetime(2026, 1, 1, 15, 0, tzinfo=tz), [{'status': 'completed', 'started_at': '2026-01-01T16:00:00+00:00'}])
+    assert not is_due(ScheduleSettings(enabled=False), datetime(2026, 1, 1, 15, 0, tzinfo=tz), [])
+
+
+def test_failed_scheduled_run_is_retried_every_five_minutes_for_two_hours():
+    tz = ZoneInfo('America/Denver')
+    cfg = ScheduleSettings(enabled=True, daily_time='09:00', timezone='America/Denver')
+    failed = lambda hh, mm: {'status': 'failed', 'started_at': datetime(2026, 1, 1, hh, mm, tzinfo=tz).astimezone(ZoneInfo('UTC')).isoformat()}
+    assert not is_due(cfg, datetime(2026, 1, 1, 9, 3, tzinfo=tz), [failed(9, 0)])  # too soon
+    assert is_due(cfg, datetime(2026, 1, 1, 9, 5, tzinfo=tz), [failed(9, 0)])
+    assert is_due(cfg, datetime(2026, 1, 1, 10, 59, tzinfo=tz), [failed(9, 0), failed(10, 54)])
+    assert not is_due(cfg, datetime(2026, 1, 1, 11, 10, tzinfo=tz), [failed(11, 0)])  # past the 2h window
+    interrupted = {'status': 'interrupted', 'started_at': failed(9, 0)['started_at']}
+    assert is_due(cfg, datetime(2026, 1, 1, 9, 6, tzinfo=tz), [interrupted])
+    # any run that completed (or partly completed, or was stopped on purpose) ends the day's job
+    for status in ('completed', 'partial', 'cancelled', 'running'):
+        assert not is_due(cfg, datetime(2026, 1, 1, 9, 30, tzinfo=tz), [failed(9, 0), {'status': status, 'started_at': failed(9, 10)['started_at']}])
+
+
+def test_cursor_rotation_wraps_and_advances(monkeypatch):
+    monkeypatch.setattr(categories, 'leaf_categories', lambda exclude=None: [{'id': i, 'name': str(i), 'path': str(i)} for i in range(1, 6)])
+    cfg = ProductAutomationSettings(categories_per_day=3)
+    first, cur, total = product_job.pick_categories(cfg, max_categories=None, category_ids=None)
+    assert [c['id'] for c in first] == [1, 2, 3] and cur == 0 and total == 5
+    automation_store.set_state('product_cursor', '3')
+    second, cur, _ = product_job.pick_categories(cfg, max_categories=None, category_ids=None)
+    assert [c['id'] for c in second] == [4, 5, 1] and cur == 3
+
+
+def test_product_job_creates_dedups_and_self_heals(monkeypatch):
+    leaf = {'id': 3, 'name': 'Cat Food', 'path': 'Animals > Cat Food'}
+    monkeypatch.setattr(product_job, 'pick_categories', lambda cfg, **kw: ([leaf], 0, 1))
+    cur = {'c': cand(source_id='a1', title='Cat Food A')}
+
+    async def fake_fetch(l, cfg, page=0, **kw):
+        return ([cur['c']] if page == 0 else []), []
+
+    async def fake_review(l, cands, want, branded):
+        return [(cur['c'], {'title': 'Cat Food A', 'short_description': 's', 'description': '<p>d</p>'})], []
+
+    created = []
+
+    class FakeWP:
+        calls = 0
+
+        @staticmethod
+        async def upload_media_bytes(**kw):
+            return {'id': 77}
+
+        @staticmethod
+        async def create_product(**kw):
+            FakeWP.calls += 1
+            if FakeWP.calls == 1:  # first attempt: stale category id -> heal -> retry
+                import httpx
+
+                req = httpx.Request('POST', 'https://x')
+                raise httpx.HTTPStatusError('bad', request=req, response=httpx.Response(400, request=req, text='{"code":"woocommerce_rest_term_invalid"}'))
+            created.append(kw['payload'])
+            return {'id': 500, 'permalink': 'https://shop/p/500'}
+
+    async def fake_prepare(cand_, copy, cfg):
+        return b'img', 'a.jpg', 'image/jpeg'
+
+    async def fake_sync():
+        return {'total': 1}
+
+    monkeypatch.setattr(sourcing, 'fetch_candidates', fake_fetch)
+    monkeypatch.setattr(claude_review, 'review_candidates', fake_review)
+    monkeypatch.setattr(product_job, 'WordPressService', FakeWP)
+    monkeypatch.setattr(product_job, '_prepare_image', fake_prepare)
+    monkeypatch.setattr(categories, 'sync_snapshot', fake_sync)
+    monkeypatch.setattr(categories, 'category_by_id', lambda i: leaf)
+    from app.services.platform_auth_service import platform_auth_service
+
+    monkeypatch.setattr(platform_auth_service, '_credentials', {'wordpress': {'domain': 'd', 'wc_consumer_key': 'k', 'wc_consumer_secret': 's'}})
+
+    cfg = ProductAutomationSettings(products_per_category=1)
+    run_id = automation_store.create_run(kind='product', trigger='manual', dry_run=False, local_date='2026-01-01')
+    status, summary = asyncio.run(product_job.run_product_job(run_id, cfg, dry_run=False))
+    assert status == 'completed' and summary['created'] == 1 and summary['errors'] == 0
+    assert created[0].categories[0].id == 3 and created[0].sale_price == '70.00'
+    assert automation_store.is_seen('impact', 'a1')
+    assert automation_store.get_state('product_cursor') == '0'
+
+    # dry run writes nothing (a fresh product, since a1 is now deduplicated)
+    FakeWP.calls = 99
+    cur['c'] = cand(source_id='a2', title='Cat Food B')
+    run2 = automation_store.create_run(kind='product', trigger='manual', dry_run=True, local_date='2026-01-01')
+    s2, sum2 = asyncio.run(product_job.run_product_job(run2, cfg, dry_run=True))
+    assert s2 == 'completed' and sum2['would_create'] == 1 and sum2['created'] == 0
+    assert not automation_store.is_seen('impact', 'a2') and len(created) == 1
+
+
+def test_python_renderer_dimensions_and_fit():
+    from app.services.image import python_renderer as pr
+
+    buf = io.BytesIO()
+    Image.new('RGB', (600, 400), (200, 30, 30)).save(buf, 'PNG')
+    for tid in pr.load_templates():
+        out = pr.render_template(tid, 'A VERY LONG PRODUCT TITLE THAT MUST SHRINK TO FIT THE BOX', buf.getvalue())
+        assert Image.open(io.BytesIO(out)).size == (999, 1079)
+    with pytest.raises(pr.RenderError):
+        pr.render_template('nope', 'x', buf.getvalue())
+    with pytest.raises(pr.RenderError):
+        pr.render_template(next(iter(pr.load_templates())), 'x', b'not an image')
+
+
+def test_renderer_dispatch_honours_flag(monkeypatch):
+    from app.services.image import renderer
+
+    seen = []
+
+    async def py(**kw):
+        seen.append('python')
+        return b'p'
+
+    async def rf(**kw):
+        seen.append('renderform')
+        return b'r'
+
+    monkeypatch.setattr(renderer, 'render_with_python', py)
+    monkeypatch.setattr(renderer, 'render_with_renderform', rf)
+    monkeypatch.setattr(get_settings(), 'USE_RENDERFORM', False)
+    assert asyncio.run(renderer.render_branded_image(template='t', title='x', image_url='u')) == b'p'
+    monkeypatch.setattr(get_settings(), 'USE_RENDERFORM', True)
+    assert asyncio.run(renderer.render_branded_image(template='t', title='x', image_url='u')) == b'r'
+    assert seen == ['python', 'renderform']
+
+
+def test_list_runs_carries_first_created_url_and_prunes_to_100():
+    rid = automation_store.create_run(kind='product', trigger='manual', dry_run=False, local_date='2026-01-01')
+    automation_store.add_run_item(rid, status='error', message='x')
+    automation_store.add_run_item(rid, status='created', message='ok', ref_id=1, ref_url='https://shop.test/p/1')
+    automation_store.add_run_item(rid, status='created', message='ok2', ref_id=2, ref_url='https://shop.test/p/2')
+    automation_store.finish_run(rid, 'completed', {})
+    assert automation_store.list_runs('product', 5)[0]['first_url'] == 'https://shop.test/p/1'
+    for _ in range(105):
+        r = automation_store.create_run(kind='blog', trigger='manual', dry_run=True, local_date='2026-01-01')
+        automation_store.finish_run(r, 'completed', {})
+    assert len(automation_store.list_runs('blog', 100)) == 100
+    assert len(automation_store.list_runs('product', 100)) == 1
+
+
+def test_cancel_run_stops_task_and_marks_cancelled(monkeypatch):
+    from app.workers import runner
+
+    async def slow(run_id, cfg, **kw):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(product_job, 'run_product_job', slow)
+
+    async def scenario():
+        run_id = runner.start_run('product', trigger='manual')
+        await asyncio.sleep(0.05)
+        assert runner.cancel_run(run_id) is True
+        await asyncio.sleep(0.1)
+        return run_id
+
+    run_id = asyncio.run(scenario())
+    run = automation_store.get_run(run_id)
+    assert run['status'] == 'cancelled'
+    assert runner.cancel_run(run_id) is False
+
+
+def test_claude_service_retries_without_temperature(monkeypatch):
+    import httpx
+    from app.services.claude.service import ClaudeService
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, headers=None, json=None):
+            calls.append(dict(json))
+            if 'temperature' in json:
+                return httpx.Response(400, text='`temperature` is deprecated for this model.', request=httpx.Request('POST', url))
+            return httpx.Response(200, json={'content': [{'type': 'text', 'text': 'ok'}]}, request=httpx.Request('POST', url))
+
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeClient)
+    out = asyncio.run(ClaudeService.generate_with_fallback(api_key='k', model_candidates=['m'], prompt='p', max_tokens=5, temperature=0.3))
+    assert out['text'] == 'ok' and 'temperature' not in calls[-1] and len(calls) == 2
+
+
+def test_category_keeps_reviewing_until_products_per_category_is_met(monkeypatch):
+    leaf = {'id': 3, 'name': 'Cat Food', 'path': 'Animals > Cat Food'}
+    monkeypatch.setattr(product_job, 'pick_categories', lambda cfg, **kw: ([leaf], 0, 1))
+    pool = [cand(source_id=f'c{i}', title=f'Cat Food {i}') for i in range(6)]
+    calls = []
+
+    async def fake_fetch(l, cfg, page=0, **kw):
+        return (pool if page == 0 else []), []
+
+    async def stingy_review(l, cands, want, branded):
+        calls.append(len(cands))
+        c = cands[0]  # Claude only likes one of the batch each time
+        return [(c, {'title': c.title, 'short_description': 's', 'description': '<p>d</p>'})], [{'id': x.source_id, 'reason': 'meh'} for x in cands[1:]]
+
+    monkeypatch.setattr(sourcing, 'fetch_candidates', fake_fetch)
+    monkeypatch.setattr(claude_review, 'review_candidates', stingy_review)
+    cfg = ProductAutomationSettings(products_per_category=2)
+    run_id = automation_store.create_run(kind='product', trigger='manual', dry_run=True, local_date='2026-01-01')
+    status, summary = asyncio.run(product_job.run_product_job(run_id, cfg, dry_run=True))
+    assert summary['would_create'] == 2 and len(calls) == 2 and status == 'completed'
+
+
+def test_job_moves_on_to_more_categories_until_the_target_is_met(monkeypatch):
+    A = {'id': 1, 'name': 'A', 'path': 'A'}
+    B = {'id': 2, 'name': 'B', 'path': 'B'}
+    C = {'id': 3, 'name': 'C', 'path': 'C'}
+    D = {'id': 4, 'name': 'D', 'path': 'D'}
+    monkeypatch.setattr(product_job, 'pick_categories', lambda cfg, **kw: ([A, B], 0, 4))
+    monkeypatch.setattr(product_job, 'extension_leaves', lambda cfg, cursor, planned: [C, D])
+    stock = {1: 1, 2: 0, 3: 1, 4: 5}  # usable products per category: A has 1, B none, C 1, D plenty
+    pages = []
+
+    async def fake_fetch(leaf, cfg, page=0, **kw):
+        pages.append((leaf['id'], page))
+        if page > 1:
+            return [], []
+        n = stock[leaf['id']] if page == 0 else 1  # page 2 of a category yields one extra
+        return [cand(source_id=f"{leaf['id']}-{page}-{i}", title=f"{leaf['name']} item {page}{i}") for i in range(n)], []
+
+    async def approve_all(leaf, cands, want, branded):
+        return [(c, {'title': c.title, 'short_description': 's', 'description': '<p>d</p>'}) for c in cands], []
+
+    monkeypatch.setattr(sourcing, 'fetch_candidates', fake_fetch)
+    monkeypatch.setattr(claude_review, 'review_candidates', approve_all)
+    cfg = ProductAutomationSettings(products_per_category=2)  # 2 planned categories x 2 = target 4
+    run_id = automation_store.create_run(kind='product', trigger='manual', dry_run=True, local_date='2026-01-01')
+    status, summary = asyncio.run(product_job.run_product_job(run_id, cfg, dry_run=True))
+    assert summary['target'] == 4 and summary['would_create'] == 4 and summary['shortfall'] == 0
+    assert any(p == (1, 1) for p in pages)  # went to page 2 of the same category before giving up on it
+
+
+def test_category_searches_as_many_pages_as_exist(monkeypatch):
+    leaf = {'id': 9, 'name': 'Deep', 'path': 'Deep'}
+    monkeypatch.setattr(product_job, 'pick_categories', lambda cfg, **kw: ([leaf], 0, 1))
+    pages = []
+
+    async def fake_fetch(l, cfg, page=0, **kw):
+        pages.append(page)
+        if page >= 10:  # results end after 10 pages
+            return [], []
+        return [cand(source_id=f'p{page}', title=f'Deep {page}')], []
+
+    async def reject_all_but_last(l, cands, want, branded):
+        ok = [(c, {'title': c.title, 'short_description': 's', 'description': '<p>d</p>'}) for c in cands if c.source_id == 'p9']
+        return ok, [{'id': c.source_id, 'reason': 'no'} for c in cands if c.source_id != 'p9']
+
+    monkeypatch.setattr(sourcing, 'fetch_candidates', fake_fetch)
+    monkeypatch.setattr(claude_review, 'review_candidates', reject_all_but_last)
+    cfg = ProductAutomationSettings(products_per_category=1)
+    run_id = automation_store.create_run(kind='product', trigger='manual', dry_run=True, local_date='2026-01-01')
+    _, summary = asyncio.run(product_job.run_product_job(run_id, cfg, dry_run=True))
+    assert summary['would_create'] == 1 and max(pages) >= 9
+
+
+def test_category_stops_when_source_ignores_page_offset(monkeypatch):
+    leaf = {'id': 9, 'name': 'Loop', 'path': 'Loop'}
+    monkeypatch.setattr(product_job, 'pick_categories', lambda cfg, **kw: ([leaf], 0, 1))
+    monkeypatch.setattr(product_job, 'extension_leaves', lambda cfg, cursor, planned: [])
+    calls = []
+
+    async def same_every_page(l, cfg, page=0, **kw):
+        calls.append(page)
+        return [cand(source_id='only', title='Loop item')], []
+
+    async def reject(l, cands, want, branded):
+        return [], [{'id': c.source_id, 'reason': 'no'} for c in cands]
+
+    monkeypatch.setattr(sourcing, 'fetch_candidates', same_every_page)
+    monkeypatch.setattr(claude_review, 'review_candidates', reject)
+    run_id = automation_store.create_run(kind='product', trigger='manual', dry_run=True, local_date='2026-01-01')
+    asyncio.run(product_job.run_product_job(run_id, ProductAutomationSettings(products_per_category=1), dry_run=True))
+    assert len(calls) <= 3
+
+
+def test_rotation_continues_after_last_category_and_wraps(monkeypatch):
+    leaves = [{'id': i, 'name': f'L{i}', 'path': f'L{i}'} for i in (10, 20, 30, 40, 50)]
+    monkeypatch.setattr(categories, 'leaf_categories', lambda excluded=None: list(leaves))
+    cfg = ProductAutomationSettings(categories_per_day=2)
+    first, cursor, total = product_job.pick_categories(cfg, max_categories=None, category_ids=None)
+    assert [c['id'] for c in first] == [10, 20] and cursor == 0 and total == 5
+    automation_store.set_state('product_last_category_id', '20')
+    second, _, _ = product_job.pick_categories(cfg, max_categories=None, category_ids=None)
+    assert [c['id'] for c in second] == [30, 40]
+    automation_store.set_state('product_last_category_id', '50')  # end of list -> wraps to the start
+    third, _, _ = product_job.pick_categories(cfg, max_categories=None, category_ids=None)
+    assert [c['id'] for c in third] == [10, 20]
+    # a re-sync that inserts/removes categories keeps going after the same id
+    leaves[:] = [c for c in leaves if c['id'] != 30] + [{'id': 25, 'name': 'new', 'path': 'new'}]
+    leaves.sort(key=lambda c: c['id'])
+    automation_store.set_state('product_last_category_id', '20')
+    after_resync, _, _ = product_job.pick_categories(cfg, max_categories=None, category_ids=None)
+    assert [c['id'] for c in after_resync] == [25, 40]
+
+
+def test_scheduler_tick_really_starts_a_scheduled_run(monkeypatch):
+    from app.schemas.automation import AutomationSettings
+    from app.services.automation import config_store
+    from app.workers import runner, scheduler
+
+    settings = AutomationSettings()
+    settings.product.enabled = True
+    settings.product.daily_time = '00:00'
+    settings.blog.enabled = False
+    monkeypatch.setattr(config_store, 'load_all', lambda: settings)
+    ran = []
+
+    async def quick(run_id, cfg, **kw):
+        ran.append(run_id)
+        return 'completed', {'created': 0}
+
+    monkeypatch.setattr(product_job, 'run_product_job', quick)
+
+    async def scenario():
+        await scheduler.tick()  # APScheduler awaits coroutine jobs on the loop
+        await asyncio.sleep(0.2)
+
+    asyncio.run(scenario())
+    assert len(ran) == 1
+    run = automation_store.get_run(ran[0])
+    assert run['trigger'] == 'schedule' and run['status'] == 'completed'
+    assert 'product' not in runner._running
+
+
+def test_tick_is_a_coroutine_function():
+    import inspect
+    from app.workers import scheduler
+
+    assert inspect.iscoroutinefunction(scheduler.tick)
+
+
+def test_start_run_off_the_event_loop_leaves_no_stuck_state():
+    from app.workers import runner
+
+    with pytest.raises(RuntimeError):
+        runner.start_run('product', trigger='schedule')
+    assert 'product' not in runner._running and not automation_store.is_kind_running('product')
+
+
+def test_earlier_cancelled_or_old_runs_never_block_the_schedule():
+    from datetime import timezone
+    from app.workers import scheduler
+
+    tz = ZoneInfo('Asia/Kolkata')
+    cfg = ScheduleSettings(enabled=True, daily_time='13:07', timezone='Asia/Kolkata')
+    now = datetime(2026, 11, 18, 13, 7, 30, tzinfo=tz)
+
+    def run_at(h, m, status, trigger='schedule'):
+        rid = automation_store.create_run(kind='product', trigger=trigger, dry_run=False, local_date='2026-11-18')
+        started = datetime(2026, 11, 18, h, m, tzinfo=tz).astimezone(timezone.utc).isoformat(timespec='seconds')
+        with automation_store._conn() as c:
+            c.execute('UPDATE runs SET started_at = ?, status = ? WHERE id = ?', (started, status, rid))
+
+    run_at(12, 52, 'cancelled')                # earlier today, before the 13:07 slot
+    run_at(13, 0, 'completed', trigger='manual')
+    assert scheduler.is_due(cfg, now, scheduler.slot_attempts('product', cfg, now))  # still runs at 13:07
+    run_at(13, 7, 'running')                    # once started for this slot, it does not start twice
+    assert not scheduler.is_due(cfg, now, scheduler.slot_attempts('product', cfg, now))
+
+
+def test_each_keyword_gets_up_to_100_reviews_and_every_keyword_is_tried(monkeypatch):
+    leaf = {'id': 1, 'name': 'Junk', 'path': 'Junk'}
+    monkeypatch.setattr(product_job, 'pick_categories', lambda cfg, **kw: ([leaf], 0, 1))
+    monkeypatch.setattr(product_job, 'extension_leaves', lambda cfg, cursor, planned: [])
+
+    async def three_keywords(l):
+        return ['k1', 'k2', 'k3']
+
+    monkeypatch.setattr(claude_review, 'suggest_keywords', three_keywords)
+    reviewed = {'k1': 0, 'k2': 0, 'k3': 0}
+    searched = []
+
+    async def fake_fetch(l, cfg, page=0, keyword=None, **kw):
+        if keyword not in searched:
+            searched.append(keyword)
+        if page >= 40:
+            return [], []
+        return [cand(source_id=f'{keyword}-{page}-{i}', title=f'{keyword} {page}{i}') for i in range(10)], []
+
+    async def review(l, cands, want, branded):
+        kw = cands[0].source_id.split('-')[0]
+        reviewed[kw] += len(cands)
+        if kw == 'k3':  # only the third keyword finds something Claude likes
+            return [(c, {'title': c.title, 'short_description': 's', 'description': '<p>d</p>'}) for c in cands[:want]], []
+        return [], [{'id': c.source_id, 'reason': 'unrelated'} for c in cands]
+
+    monkeypatch.setattr(sourcing, 'fetch_candidates', fake_fetch)
+    monkeypatch.setattr(claude_review, 'review_candidates', review)
+    cfg = ProductAutomationSettings(products_per_category=1)
+    run_id = automation_store.create_run(kind='product', trigger='manual', dry_run=True, local_date='2026-01-01')
+    _, summary = asyncio.run(product_job.run_product_job(run_id, cfg, dry_run=True))
+    assert reviewed['k1'] == 100 and reviewed['k2'] == 100  # hopeless keywords are capped at 100 products each
+    assert searched == ['k1', 'k2', 'k3'] and summary['would_create'] == 1  # ...and the next keyword still finds one
+
+
+def test_cj_paging_uses_next_page_cursor_not_offset(monkeypatch):
+    leaf = {'id': 5, 'name': 'Tech', 'path': 'Tech'}
+    cfg = ProductAutomationSettings(use_impact=False)
+    seen_cursors = []
+
+    async def fake_fetch_cj(l, c, kw, cursor):
+        seen_cursors.append(cursor)
+        nxt = {None: 'tok1', 'tok1': 'tok2', 'tok2': None}[cursor]
+        return [cand(source_id=f'x{len(seen_cursors)}')], nxt
+
+    monkeypatch.setattr(sourcing, '_fetch_cj', fake_fetch_cj)
+    state = {}
+    for _ in range(4):
+        asyncio.run(sourcing.fetch_candidates(leaf, cfg, state=state, keyword='tech'))
+    assert seen_cursors == [None, 'tok1', 'tok2']  # fourth call: CJ exhausted, not queried again
+
+
+def test_only_one_run_of_a_kind_can_start_even_across_workers():
+    first = automation_store.try_create_run(kind='product', trigger='schedule', dry_run=False, local_date='2026-01-01')
+    assert first is not None
+    assert automation_store.try_create_run(kind='product', trigger='schedule', dry_run=False, local_date='2026-01-01') is None
+    assert automation_store.try_create_run(kind='blog', trigger='schedule', dry_run=False, local_date='2026-01-01') is not None
+    automation_store.finish_run(first, 'completed', {})
+    assert automation_store.try_create_run(kind='product', trigger='schedule', dry_run=False, local_date='2026-01-01') is not None
+
+
+def test_stale_detection_ignores_live_runs_and_closes_dead_ones():
+    live = automation_store.try_create_run(kind='product', trigger='schedule', dry_run=False, local_date='2026-01-01')
+    assert automation_store.mark_stale_runs_interrupted(300) == 0  # fresh heartbeat: another worker's live run is left alone
+    with automation_store._conn() as c:
+        c.execute("UPDATE runs SET updated_at = '2020-01-01T00:00:00+00:00' WHERE id = ?", (live,))
+    assert automation_store.mark_stale_runs_interrupted(300) == 1
+    assert automation_store.get_run(live)['status'] == 'interrupted'
+    # a log line / progress save is a heartbeat
+    live2 = automation_store.try_create_run(kind='product', trigger='schedule', dry_run=False, local_date='2026-01-01')
+    with automation_store._conn() as c:
+        c.execute("UPDATE runs SET updated_at = '2020-01-01T00:00:00+00:00' WHERE id = ?", (live2,))
+    automation_store.add_run_item(live2, status='info', message='still working')
+    assert automation_store.mark_stale_runs_interrupted(300) == 0
+
+
+def test_category_resync_is_written_to_the_persistent_folder_not_the_repo(monkeypatch, tmp_path):
+    from app.services.platform_auth_service import platform_auth_service
+
+    async def fake_raw(**kw):
+        return RAW
+
+    monkeypatch.setattr(categories, '_fetch_all_raw', fake_raw)
+    monkeypatch.setattr(platform_auth_service, '_credentials', {'wordpress': {'domain': 'd', 'wc_consumer_key': 'k', 'wc_consumer_secret': 's'}})
+    bundled_before = categories.SNAPSHOT_PATH.read_bytes()
+    asyncio.run(categories.sync_snapshot())
+    assert (tmp_path / 'wp_categories.json').exists()
+    assert categories.SNAPSHOT_PATH.read_bytes() == bundled_before  # repo file untouched
+    assert categories.load_snapshot(force=True)['total'] == len(RAW)  # and the runtime copy is what gets loaded
+    categories._cache = None

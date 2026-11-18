@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     RENDERFORM_API_KEY: str = ''
     CLAUDE_API_KEY: str = ''
 
+    # true = render branded images with the RenderForm API, false = free local Pillow renderer.
+    USE_RENDERFORM: bool = True
+
+    # CJ account identifiers used by the unattended automation (same values the frontend sends).
+    CJ_COMPANY_ID: str = '6947255'
+    CJ_PID: str = '101105481'
+
+    # Claude model(s) used by the automation review/copy/blog steps (comma separated, tried in order).
+    AUTOMATION_CLAUDE_MODELS: str = 'claude-haiku-5-5'
+
 
 @lru_cache
 def get_settings() -> Settings:

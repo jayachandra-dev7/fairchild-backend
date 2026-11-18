@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from httpx import HTTPError, HTTPStatusError
 
+from app.core.config import get_settings
 from app.schemas.common import ApiResponse, ErrorDetail
 from app.schemas.renderform.auth import RenderFormAuthorizeRequest, RenderFormAuthorizeResponse
 from app.schemas.renderform.render import RenderFormRenderRequest
@@ -193,8 +194,8 @@ async def renderform_render_upload(
     title_text: str = Form(default='AUTOMATION TEST', alias='titleText'),
     image: UploadFile = File(...),
 ) -> ApiResponse[Any]:
-    api_key = _resolve_renderform_api_key()
     image_bytes = await image.read()
+    api_key = _resolve_renderform_api_key()
     completed_steps: list[str] = []
     try:
         validate_image_bytes(

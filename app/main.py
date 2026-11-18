@@ -1,4 +1,5 @@
 import json
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi import HTTPException as FastAPIHTTPException
@@ -10,14 +11,27 @@ from app.api.v1.router import api_router
 from app.core.config import get_cors_origins, get_settings
 from app.schemas.common import ApiResponse, ErrorDetail
 from app.services.platform_auth_service import platform_auth_service
+from app.workers import scheduler
 
 settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await preload_platform_credentials()
+    scheduler.start()
+    try:
+        yield
+    finally:
+        scheduler.stop()
+
 
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     docs_url='/docs',
     redoc_url='/redoc',
+    lifespan=lifespan,
 )
 
 
@@ -69,7 +83,6 @@ async def generic_exception_handler(_, __: Exception) -> JSONResponse:
     return JSONResponse(status_code=500, content=body)
 
 
-@app.on_event('startup')
 async def preload_platform_credentials() -> None:
     if settings.CJ_TOKEN:
         platform_auth_service.set_token('cj', settings.CJ_TOKEN)

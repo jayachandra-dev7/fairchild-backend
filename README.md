@@ -220,3 +220,10 @@ There is no promotions filter: `PromotionIds=!=null` returns `400 Invalid search
 - Requires `CLAUDE_API_KEY` in `.env`
 - Upstream URL: `https://api.anthropic.com/v1/messages`
 - Supports model fallback via `modelCandidates`
+
+## GPC Website Automation
+Daily scheduled product + blog posting driven from the frontend `/gpc` page.
+- Category tree snapshot: `app/data/wp_categories.json` (refresh with `python -m scripts.sync_wp_categories` or `POST /api/v1/automation/categories/sync`; the job also re-syncs automatically if WordPress rejects a category id).
+- Settings, run history, dedup log and the category rotation cursor live in a small SQLite file (`data/automation.db`; `/home/data/automation.db` on Azure). Only the last 100 runs per job are kept.
+- Endpoints: `GET/PUT /automation/settings`, `GET /automation/status`, `GET /automation/sources`, `POST /automation/product/run`, `POST /automation/blog/run` (`{"dry_run": true, "max_categories": 3}`), `GET /automation/runs[/{id}]`, `GET /automation/categories`, `POST /automation/categories/sync`.
+- Branded images: `USE_RENDERFORM=false` makes the frontend call `/api/v1/renderpython/*` (templates, previews, render, render/upload, files) instead of `/api/v1/renderform/*`; `GET /api/v1/health/render-engine` tells it which. The automation follows the same flag. Local engine = Pillow renderer (`app/data/renderform_templates.json`, fonts in `app/assets/fonts`). Refresh templates with `python -m scripts.sync_renderform_templates`.

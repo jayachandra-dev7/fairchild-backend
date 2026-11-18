@@ -1,0 +1,104 @@
+{
+  "massive-snakes-scrape-hungrily-1954": {
+    "name": "Kumon Template",
+    "width": 999,
+    "height": 1079,
+    "quality": 90,
+    "background": [
+      255,
+      255,
+      255
+    ],
+    "title": {
+      "x": 254,
+      "y": 92,
+      "w": 574,
+      "h": 117,
+      "font_family": "Anton",
+      "font_file": "Anton-Regular.ttf",
+      "color": [
+        30,
+        30,
+        30
+      ],
+      "default_text": "Kumon/Quigley-Simpson",
+      "baseline_ratio": 0.427
+    },
+    "image": {
+      "x": 91,
+      "y": 209,
+      "w": 900,
+      "h": 900,
+      "fit": "contain",
+      "sample_src": "https://cdn.renderform.io/hpCCxS9SIUDo83HnyCIz/uploads/dea36d03-c0c5-4834-bc36-ada7792600c7/kumon.png"
+    }
+  },
+  "blue-monsters-cheer-greedily-1817": {
+    "name": "Template 2",
+    "width": 999,
+    "height": 1079,
+    "quality": 90,
+    "background": [
+      255,
+      255,
+      255
+    ],
+    "title": {
+      "x": 126,
+      "y": 724,
+      "w": 749,
+      "h": 96,
+      "font_family": "Bungee",
+      "font_file": "Bungee-Regular.ttf",
+      "color": [
+        30,
+        30,
+        30
+      ],
+      "default_text": "WEEKEND READY",
+      "baseline_ratio": 0.76
+    },
+    "image": {
+      "x": -14,
+      "y": -79,
+      "w": 1028,
+      "h": 883,
+      "fit": "contain",
+      "sample_src": "https://cdn.renderform.io/hpCCxS9SIUDo83HnyCIz/uploads/5cd5a592-9194-46da-8f52-f4cbddf85fd7/nike.png"
+    }
+  },
+  "burly-bears-drink-shyly-1844": {
+    "name": "Template 1",
+    "width": 999,
+    "height": 1079,
+    "quality": 90,
+    "background": [
+      255,
+      255,
+      255
+    ],
+    "title": {
+      "x": 178,
+      "y": 80,
+      "w": 705,
+      "h": 154,
+      "font_family": "Rammetto One",
+      "font_file": "RammettoOne-Regular.ttf",
+      "color": [
+        30,
+        30,
+        30
+      ],
+      "default_text": "Coveted",
+      "baseline_ratio": 0.78
+    },
+    "image": {
+      "x": 140,
+      "y": 298,
+      "w": 782,
+      "h": 746,
+      "fit": "contain",
+      "sample_src": "https://cdn.renderform.io/hpCCxS9SIUDo83HnyCIz/uploads/d82f56d2-84a9-4a15-83be-a0efb85afb41/sample.png"
+    }
+  }
+}

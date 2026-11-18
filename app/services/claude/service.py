@@ -47,6 +47,10 @@ class ClaudeService:
                 if system:
                     payload['system'] = system
                 response = await client.post(cls.base_url, headers=headers, json=payload)
+                if response.status_code == 400 and 'temperature' in response.text:
+                    # Newer models reject the temperature parameter; retry the same model without it.
+                    payload.pop('temperature', None)
+                    response = await client.post(cls.base_url, headers=headers, json=payload)
 
                 if response.status_code < 400:
                     data = response.json()
