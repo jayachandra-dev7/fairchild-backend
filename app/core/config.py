@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     WORDPRESS_DOMAIN: str = ''
     WORDPRESS_WC_CONSUMER_KEY: str = ''
     WORDPRESS_WC_CONSUMER_SECRET: str = ''
+    # WordPress username + Application Password. When set, these are used for ALL WordPress/WooCommerce
+    # calls (they work for /wp/v2 media + posts as well as /wc/v3, unlike consumer keys).
+    WORDPRESS_USERNAME: str = ''
+    WORDPRESS_APP_PASSWORD: str = ''
 
     METRICOOL_TOKEN: str = ''
     METRICOOL_USER_ID: str = ''

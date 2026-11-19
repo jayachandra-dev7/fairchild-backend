@@ -102,13 +102,17 @@ async def preload_platform_credentials() -> None:
             },
         )
 
-    if settings.WORDPRESS_DOMAIN and settings.WORDPRESS_WC_CONSUMER_KEY and settings.WORDPRESS_WC_CONSUMER_SECRET:
+    # The credential field names are historical: the pair is sent as HTTP Basic auth, so a WordPress
+    # username + Application Password can be stored in the same slots and takes precedence.
+    wp_user = settings.WORDPRESS_USERNAME.strip() or settings.WORDPRESS_WC_CONSUMER_KEY
+    wp_secret = settings.WORDPRESS_APP_PASSWORD.strip() if settings.WORDPRESS_USERNAME.strip() else settings.WORDPRESS_WC_CONSUMER_SECRET
+    if settings.WORDPRESS_DOMAIN and wp_user and wp_secret:
         platform_auth_service.set_credentials(
             'wordpress',
             {
                 'domain': settings.WORDPRESS_DOMAIN,
-                'wc_consumer_key': settings.WORDPRESS_WC_CONSUMER_KEY,
-                'wc_consumer_secret': settings.WORDPRESS_WC_CONSUMER_SECRET,
+                'wc_consumer_key': wp_user,
+                'wc_consumer_secret': wp_secret,
             },
         )
 

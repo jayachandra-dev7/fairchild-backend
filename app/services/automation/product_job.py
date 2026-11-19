@@ -60,6 +60,7 @@ class _Run:
         self.cfg = cfg
         self.dry_run = dry_run
         self.healed = False
+        self.verified_categories: set[int] = set()
         self.heal_lock = asyncio.Lock()
         self.meta: dict[str, Any] = {}  # planned/target/etc., kept in every progress save
         self.stats = {'categories_done': 0, 'created': 0, 'skipped_categories': 0, 'errors': 0, 'would_create': 0}
@@ -100,6 +101,24 @@ async def _heal(run: _Run, leaf: dict[str, Any]) -> dict[str, Any] | None:
             snap = await categories.sync_snapshot()
             run.log('info', f"Category snapshot re-synced from WordPress ({snap['total']} categories).")
     return categories.category_by_id(leaf['id']) or categories.find_by_path(leaf['path'])
+
+
+async def _category_exists(creds: dict[str, Any], category_id: int) -> bool | None:
+    """True/False if WordPress says the category exists; None when it cannot be checked (then just proceed)."""
+    base = str(creds['domain']).strip().rstrip('/')
+    if not base.startswith('http'):
+        base = f'https://{base}'
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                f'{base}/wp-json/wc/v3/products/categories/{category_id}',
+                auth=(creds['wc_consumer_key'], creds['wc_consumer_secret']),
+            )
+    except httpx.HTTPError:
+        return None
+    if resp.status_code == 404:
+        return False
+    return True if resp.status_code == 200 else None
 
 
 async def _prepare_image(cand: Candidate, copy: dict[str, Any], cfg: ProductAutomationSettings) -> tuple[bytes, str, str]:
@@ -149,6 +168,15 @@ async def _create_in_wordpress(run: _Run, leaf: dict[str, Any], cand: Candidate,
         )
 
     category_id = leaf['id']
+    # WordPress silently files a product under "Uncategorized" when the category id no longer exists, so check first
+    # (cached per run). A stale snapshot is then re-synced and the category re-resolved by its path.
+    if category_id not in run.verified_categories:
+        if await _category_exists(creds, category_id) is False:
+            fresh = await _heal(run, leaf)
+            if not fresh or await _category_exists(creds, fresh['id']) is False:
+                raise RuntimeError(f'Category {leaf["id"]} ({leaf["path"]}) no longer exists in WordPress.')
+            category_id = fresh['id']
+        run.verified_categories.add(category_id)
     try:
         product = await run_with_retry(step='wordpress_product_create', operation=lambda: WordPressService.create_product(**kw, payload=payload(category_id)))
     except Exception as exc:  # noqa: BLE001
