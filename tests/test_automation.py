@@ -561,3 +561,31 @@ def test_category_resync_is_written_to_the_persistent_folder_not_the_repo(monkey
     assert categories.SNAPSHOT_PATH.read_bytes() == bundled_before  # repo file untouched
     assert categories.load_snapshot(force=True)['total'] == len(RAW)  # and the runtime copy is what gets loaded
     categories._cache = None
+
+
+def test_custom_blog_generate_and_publish(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from app.services.automation import blog_job
+    from app.services.wordpress.service import WordPressService
+
+    async def fake_ask(prompt, **kw):
+        assert 'gift ideas for runners' in prompt
+        return '{"title":"Gifts for Runners","excerpt":"Short.","content":"<p>Hi</p>"}'
+
+    seen = {}
+
+    async def fake_create(**kw):
+        seen['payload'] = kw['payload']
+        return {'id': 7, 'link': 'https://x/p', 'status': kw['payload'].status}
+
+    monkeypatch.setattr(blog_job.claude_review, 'ask_claude', fake_ask)
+    monkeypatch.setattr(WordPressService, 'create_post', staticmethod(fake_create))
+    monkeypatch.setattr(blog_job.platform_auth_service, 'get_credentials', lambda _n: {'domain': 'd', 'wc_consumer_key': 'k', 'wc_consumer_secret': 's'})
+    client = TestClient(app)
+    r = client.post('/api/v1/automation/blog/custom/generate', json={'prompt': 'gift ideas for runners'})
+    assert r.status_code == 200 and r.json()['data']['title'] == 'Gifts for Runners'
+    r = client.post('/api/v1/automation/blog/custom/publish', json={'title': 'T', 'content': '<p>x</p>', 'status': 'draft'})
+    assert r.status_code == 200 and r.json()['data']['link'] == 'https://x/p' and seen['payload'].status == 'draft'
+    assert client.post('/api/v1/automation/blog/custom/publish', json={'title': 'T', 'content': 'x', 'status': 'bogus'}).status_code == 422

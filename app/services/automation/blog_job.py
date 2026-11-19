@@ -119,3 +119,37 @@ async def run_blog_job(run_id: int, cfg: BlogAutomationSettings, *, dry_run: boo
     done = stats['published'] + stats['would_publish']
     status = 'failed' if stats['errors'] and not done else 'partial' if stats['errors'] else 'completed'
     return status, stats
+
+
+# ---------------------------------------------------------------- custom (one-off, human-reviewed) blog
+
+CUSTOM_SYSTEM = (
+    'You are a skilled blog writer for a shopping and deals website. Follow the editor\'s instructions closely. '
+    'Never invent specs, ratings, prices or claims about specific products. Respond with a single JSON object and nothing else.'
+)
+
+
+async def generate_custom_blog(prompt: str) -> dict[str, str]:
+    """Claude drafts a post from the editor's prompt. Nothing is published; the editor reviews it first."""
+    text = (
+        f'Editor instructions:\n"""\n{prompt.strip()}\n"""\n\n'
+        'Write the blog post as clean HTML (<h2>, <p>, <ul>, <a>; no <html>/<body>, no <h1>, no scripts). '
+        'If the instructions give a length, tone or links, follow them; otherwise write 450-650 words. Return exactly:\n'
+        '{"title":"SEO-friendly title under 65 characters","excerpt":"1-2 sentence summary, plain text","content":"<p>...</p>"}'
+    )
+    data = claude_review.extract_json(await claude_review.ask_claude(text, max_tokens=4000, temperature=0.7, system=CUSTOM_SYSTEM))
+    title, content = str(data.get('title', '')).strip(), str(data.get('content', '')).strip()
+    if not title or not content:
+        raise ValueError('Claude returned an empty title or body. Try rewording the prompt.')
+    return {'title': title, 'excerpt': str(data.get('excerpt', '')).strip(), 'content': content}
+
+
+async def publish_custom_blog(*, title: str, content: str, excerpt: str, status: str) -> dict[str, Any]:
+    creds = platform_auth_service.get_credentials('wordpress')
+    if not creds:
+        raise RuntimeError('WordPress credentials are not configured.')
+    kw = {'domain': creds['domain'], 'wc_consumer_key': creds['wc_consumer_key'], 'wc_consumer_secret': creds['wc_consumer_secret']}
+    payload = WordPressPostCreateRequest(title=title, content=content, status=status, excerpt=excerpt)
+    post = await run_with_retry(step='wordpress_post_create', operation=lambda: WordPressService.create_post(**kw, payload=payload))
+    automation_store.record_blog(wp_post_id=post.get('id'), category_id=None, title=title, link=post.get('link'))
+    return {'id': post.get('id'), 'link': post.get('link'), 'status': post.get('status')}

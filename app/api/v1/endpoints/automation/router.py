@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import httpx
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 
 from app.core.config import get_settings
 from app.db import automation_store
 from app.schemas.automation import AutomationSettings, RunRequest
 from app.schemas.common import ApiResponse, ErrorDetail
-from app.services.automation import categories, config_store, sources
+from app.services.automation import blog_job, categories, config_store, sources
 from app.workers import runner
 
 
@@ -88,6 +90,40 @@ async def run_product(body: RunRequest) -> ApiResponse[dict]:
 @router.post('/blog/run', response_model=ApiResponse[dict])
 async def run_blog(body: RunRequest) -> ApiResponse[dict]:
     return _start('blog', body)
+
+
+class CustomBlogPrompt(BaseModel):
+    prompt: str = Field(min_length=5, max_length=4000)
+
+
+class CustomBlogPublish(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1)
+    excerpt: str = ''
+    status: str = Field(default='draft', pattern='^(publish|draft|pending)$')
+
+
+def _upstream(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f'{exc.response.status_code} {exc.response.text[:200]}'
+    return f'{exc.__class__.__name__}: {str(exc)[:200]}'
+
+
+@router.post('/blog/custom/generate', response_model=ApiResponse[dict])
+async def custom_blog_generate(body: CustomBlogPrompt) -> ApiResponse[dict]:
+    """Draft a blog post from the editor's prompt. Not published; the UI shows it for review."""
+    try:
+        return ApiResponse(data=await blog_job.generate_custom_blog(body.prompt))
+    except Exception as exc:  # noqa: BLE001
+        raise _err('CUSTOM_BLOG_GENERATE_FAILED', _upstream(exc), 502) from exc
+
+
+@router.post('/blog/custom/publish', response_model=ApiResponse[dict])
+async def custom_blog_publish(body: CustomBlogPublish) -> ApiResponse[dict]:
+    try:
+        return ApiResponse(data=await blog_job.publish_custom_blog(title=body.title, content=body.content, excerpt=body.excerpt, status=body.status))
+    except Exception as exc:  # noqa: BLE001
+        raise _err('CUSTOM_BLOG_PUBLISH_FAILED', _upstream(exc), 502) from exc
 
 
 @router.get('/runs', response_model=ApiResponse[list])
