@@ -14,7 +14,7 @@ import httpx
 from app.db import automation_store
 from app.schemas.automation import Candidate, ProductAutomationSettings
 from app.schemas.wordpress.product import WooProductCategory, WooProductCreateRequest, WooProductImage, WooProductMetaData
-from app.services.automation import categories, claude_review, filters, sourcing
+from app.services.automation import categories, claude_review, dedupe, existing_products, filters, sourcing
 from app.services.image.renderer import render_branded_image
 from app.services.platform_auth_service import platform_auth_service
 from app.services.wordpress.service import WordPressService
@@ -61,6 +61,7 @@ class _Run:
         self.dry_run = dry_run
         self.healed = False
         self.verified_categories: set[int] = set()
+        self.claimed: set[str] = set()  # fingerprint keys of products picked in this run (workers run concurrently)
         self.heal_lock = asyncio.Lock()
         self.meta: dict[str, Any] = {}  # planned/target/etc., kept in every progress save
         self.stats = {'categories_done': 0, 'created': 0, 'skipped_categories': 0, 'errors': 0, 'would_create': 0}
@@ -281,6 +282,11 @@ async def _process_category(run: _Run, leaf: dict[str, Any], quota: int) -> int:
                     if made >= quota:
                         break
                     label = f"{copy.get('title') or cand.title} ({cand.source}, ${cand.sale_price:.2f}, -{cand.discount:.0f}%)"
+                    fp = dedupe.fingerprint(cand)
+                    if run.claimed.intersection(fp.keys()):  # another worker/category already picked this product
+                        why['already picked in this run'] += 1
+                        continue
+                    run.claimed.update(fp.keys())  # no await between the check and the claim, so this cannot race
                     if run.dry_run:
                         made += 1
                         run.stats['would_create'] += 1
@@ -291,13 +297,15 @@ async def _process_category(run: _Run, leaf: dict[str, Any], quota: int) -> int:
                         res = await _create_in_wordpress(run, leaf, cand, copy)
                     except Exception as exc:  # noqa: BLE001 - one bad product must not stop the category
                         run.stats['errors'] += 1
+                        run.claimed.difference_update(fp.keys())
                         run.log('error', f'{label}: {describe_error(exc)}', leaf)
                         continue
                     product = res['product']
                     automation_store.record_product(
                         source=cand.source, source_id=cand.source_id, wp_product_id=product.get('id'), media_id=res['media_id'],
                         category_id=res['category_id'], name=str(copy.get('title') or cand.title), permalink=product.get('permalink'),
-                        image_url=cand.image_url, price=f'{cand.price:.2f}', sale_price=f'{cand.sale_price:.2f}',
+                        image_url=None, price=f'{cand.price:.2f}', sale_price=f'{cand.sale_price:.2f}',
+                        core_id=fp.core_id, title_key=fp.title_key, image_key=fp.image_key, desc_key=fp.desc_key,
                     )
                     made += 1
                     run.stats['created'] += 1
@@ -346,6 +354,7 @@ async def run_product_job(
     summary: dict[str, Any] = {'categories_planned': len(todays), 'target': target, 'total_leaf_categories': total, 'cursor_start': cursor, **run.stats}
     run.meta = {k: v for k, v in summary.items() if k not in run.stats}
     run.save()
+    await existing_products.seed(run)
     run.log('info', f'Goal: {target} products ({len(todays)} categories x {per_cat}). Starting at category position {cursor} of {total}.')
 
     queue: list[dict[str, Any]] = list(todays)

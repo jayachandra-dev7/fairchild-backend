@@ -589,3 +589,99 @@ def test_custom_blog_generate_and_publish(monkeypatch):
     r = client.post('/api/v1/automation/blog/custom/publish', json={'title': 'T', 'content': '<p>x</p>', 'status': 'draft'})
     assert r.status_code == 200 and r.json()['data']['link'] == 'https://x/p' and seen['payload'].status == 'draft'
     assert client.post('/api/v1/automation/blog/custom/publish', json={'title': 'T', 'content': 'x', 'status': 'bogus'}).status_code == 422
+
+
+# ---------------------------------------------------------------- duplicate check
+
+def _impact(sid, title='Tactacam Reveal No Trespassing Sign 3-Pack', image='https://cdn.x/img/tactacam-sign-3pack.jpg'):
+    return Candidate(source='impact', source_id=sid, title=title, buy_url='https://b/x', image_url=image, price=50, sale_price=30, discount=40)
+
+
+def test_core_id_matches_across_advertiser_ids():
+    from app.services.automation import dedupe
+
+    ids = ['product_4595_101529191-3943173', 'product_895_3943173', 'product_10636_3943173', 'product_10637_101529191-3943173']
+    assert {dedupe.core_id('impact', i) for i in ids} == {'impact:3943173'}
+    assert dedupe.core_id('cj', '6511865:51153491702') == 'cj:51153491702'
+    assert dedupe.image_key('https://x/1.jpg') is None  # too generic to trust
+
+
+def test_filter_rejects_same_product_under_new_id():
+    from app.services.automation import dedupe
+
+    first = _impact('product_895_3943173')
+    fp = dedupe.fingerprint(first)
+    automation_store.record_product(
+        source='impact', source_id=first.source_id, wp_product_id=1, media_id=None, category_id=3, name='x', permalink=None,
+        image_url=None, price='50', sale_price='30', core_id=fp.core_id, title_key=fp.title_key, image_key=fp.image_key,
+    )
+    cfg = ProductAutomationSettings()
+    same_core = _impact('product_4595_101529191-3943173', title='Totally different words here', image='https://o/other-picture-name.jpg')
+    same_title = _impact('product_1_1111111', image='https://o/another-picture-name.jpg')
+    fresh = _impact('product_2_2222222', title='Garmin Forerunner Watch', image='https://o/garmin-forerunner.jpg')
+    kept, rejected = filters.filter_and_rank([same_core, same_title, fresh], cfg)
+    assert [c.source_id for c in kept] == ['product_2_2222222']
+    assert rejected['already posted (same product)'] == 2
+
+
+def test_filter_drops_duplicates_inside_one_batch():
+    cfg = ProductAutomationSettings()
+    a, b = _impact('product_895_3943173'), _impact('product_4595_101529191-3943173')
+    kept, _ = filters.filter_and_rank([a, b], cfg)
+    assert len(kept) == 1
+
+
+def test_history_is_capped_and_old_details_dropped(monkeypatch):
+    monkeypatch.setattr(automation_store, 'KEEP_SEEN_PRODUCTS', 5)
+    monkeypatch.setattr(automation_store, 'KEEP_LOG_LINES', 3)
+    run_id = automation_store.try_create_run(kind='product', trigger='manual', dry_run=True, local_date='2026-01-01')
+    for i in range(10):
+        automation_store.add_run_item(run_id, status='info', message=f'line {i}')
+        automation_store.record_product(
+            source='cj', source_id=f'1:{i}0000', wp_product_id=i, media_id=1, category_id=3, name=f'n{i}', permalink='p',
+            image_url=None, price='1', sale_price='1', core_id=f'cj:{i}0000', created_at=f'2026-01-{i + 1:02d}T00:00:00+00:00',
+        )
+    automation_store.finish_run(run_id, 'completed', {})
+    with automation_store._conn() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM run_items').fetchone()[0] == 3
+        assert conn.execute('SELECT COUNT(*) FROM seen_products').fetchone()[0] == 5
+        assert conn.execute('SELECT MIN(created_at) FROM seen_products').fetchone()[0].startswith('2026-01-06')
+        assert conn.execute('SELECT COUNT(*) FROM seen_products WHERE name IS NOT NULL').fetchone()[0] == 0  # older than 30 days: keys only
+
+
+def test_seed_from_wordpress_learns_ids_and_titles(monkeypatch):
+    import httpx
+
+    from app.services.automation import existing_products
+    from app.services.platform_auth_service import platform_auth_service
+
+    monkeypatch.setattr(platform_auth_service, 'get_credentials', lambda _n: {'domain': 'shop.test', 'wc_consumer_key': 'k', 'wc_consumer_secret': 's'})
+    page = [{'id': 9, 'name': 'Nite Ize Wraptor Mount', 'date_created_gmt': '2026-11-20T10:00:00',
+             'meta_data': [{'key': 'automation_source', 'value': 'impact'}, {'key': 'automation_source_id', 'value': 'product_895_2512178'}]}]
+
+    def handler(request):
+        return httpx.Response(200, json=page if request.url.params['page'] == '1' else [])
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(existing_products.httpx, 'AsyncClient', lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+
+    class R:
+        def log(self, *a, **k): pass
+
+    assert asyncio.run(existing_products.seed(R())) == 1
+    assert asyncio.run(existing_products.seed(R())) == 0  # already known: nothing re-added
+    assert automation_store.seen_fingerprint_keys(['core:impact:2512178']) == {'core:impact:2512178'}
+
+
+def test_size_variants_with_new_title_are_the_same_product():
+    from app.services.automation import dedupe
+
+    desc = 'Breathable mesh running shoe with cushioned midsole and durable rubber outsole for daily training.'
+    a = Candidate(source='cj', source_id='1:10000001', title='Acme Runner - Size 8', description=desc, buy_url='b', image_url='https://a/x1.jpg', price=90, sale_price=60, discount=33)
+    b = Candidate(source='cj', source_id='1:10000002', title='Acme Runner Trail Edition 9', description=desc, buy_url='b', image_url='https://other/y2.jpg', price=90, sale_price=60, discount=33)
+    fp = dedupe.fingerprint(a)
+    automation_store.record_product(source='cj', source_id=a.source_id, wp_product_id=1, media_id=None, category_id=3, name='x', permalink=None,
+                                    image_url=None, price='90', sale_price='60', core_id=fp.core_id, title_key=fp.title_key, image_key=fp.image_key, desc_key=fp.desc_key)
+    kept, rejected = filters.filter_and_rank([b], ProductAutomationSettings())
+    assert kept == [] and rejected['already posted (same product)'] == 1
+    assert len(filters.filter_and_rank([a.model_copy(update={'source_id': '1:10000003'}), b], ProductAutomationSettings())[0]) <= 1

@@ -5,6 +5,7 @@ import random
 from collections import Counter
 
 from app.db import automation_store
+from app.services.automation import dedupe
 from app.schemas.automation import HARD_MAX_PRICE, Candidate, ProductAutomationSettings, parse_keywords
 
 MAX_BELIEVABLE_DISCOUNT = 90.0  # beyond this the 'original price' is usually fake or an error
@@ -44,6 +45,9 @@ def filter_and_rank(candidates: list[Candidate], cfg: ProductAutomationSettings)
     for source in {c.source for c in candidates}:
         already[source] = automation_store.seen_ids(source, [c.source_id for c in candidates if c.source == source])
 
+    prints = {(c.source, c.source_id): dedupe.fingerprint(c) for c in candidates}
+    posted = automation_store.seen_fingerprint_keys([k for fp in prints.values() for k in fp.keys()])
+
     for c in candidates:
         key = (c.source, c.source_id)
         if key in seen_keys:
@@ -51,6 +55,9 @@ def filter_and_rank(candidates: list[Candidate], cfg: ProductAutomationSettings)
         seen_keys.add(key)
         if c.source_id in already.get(c.source, set()):
             rejected['already posted'] += 1
+            continue
+        if posted.intersection(prints[key].keys()):
+            rejected['already posted (same product)'] += 1
             continue
         reason = reject_reason(c, cfg, ignore)
         if reason:
@@ -62,13 +69,13 @@ def filter_and_rank(candidates: list[Candidate], cfg: ProductAutomationSettings)
     # category outranks chance. sort() is stable, so shuffling first randomises ties.
     random.shuffle(kept)
     kept.sort(key=lambda c: c.relevance, reverse=True)
-    # Drop near-duplicate titles (same product from two networks / variants).
+    # Drop the same product listed twice in this batch (other advertiser/campaign id, same title or image).
     unique: list[Candidate] = []
-    titles: set[str] = set()
+    taken: set[str] = set()
     for c in kept:
-        norm = ' '.join(c.title.lower().split())[:60]
-        if norm in titles:
+        keys = prints[(c.source, c.source_id)].keys()
+        if taken.intersection(keys):
             continue
-        titles.add(norm)
+        taken.update(keys)
         unique.append(c)
     return unique, rejected

@@ -57,6 +57,10 @@ CREATE TABLE IF NOT EXISTS seen_products (
     price TEXT,
     sale_price TEXT,
     created_at TEXT NOT NULL,
+    core_id TEXT,
+    title_key TEXT,
+    image_key TEXT,
+    desc_key TEXT,
     PRIMARY KEY (source, source_id)
 );
 CREATE INDEX IF NOT EXISTS idx_seen_category ON seen_products(category_id);
@@ -100,6 +104,13 @@ def _conn() -> Iterator[sqlite3.Connection]:
             cols = {r[1] for r in conn.execute('PRAGMA table_info(runs)')}
             if 'updated_at' not in cols:  # database created by an earlier version
                 conn.execute('ALTER TABLE runs ADD COLUMN updated_at TEXT')
+            seen_cols = {r[1] for r in conn.execute('PRAGMA table_info(seen_products)')}
+            for col in ('core_id', 'title_key', 'image_key', 'desc_key'):  # added with the duplicate check
+                if col not in seen_cols:
+                    conn.execute(f'ALTER TABLE seen_products ADD COLUMN {col} TEXT')
+            for col in ('core_id', 'title_key', 'image_key', 'desc_key'):
+                conn.execute(f'CREATE INDEX IF NOT EXISTS idx_seen_{col} ON seen_products({col})')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_seen_created ON seen_products(created_at)')
             yield conn
             conn.commit()
         finally:
@@ -146,6 +157,22 @@ def create_run(*, kind: str, trigger: str, dry_run: bool, local_date: str) -> in
 
 
 KEEP_RUNS_PER_KIND = 100
+KEEP_LOG_LINES = 200  # run log lines kept in total (newest)
+KEEP_SEEN_PRODUCTS = 10_000  # distinct products remembered for the duplicate check (newest)
+KEEP_PRODUCT_DETAIL_DAYS = 30  # name/link/price are only needed for blogs about recent products; older rows keep keys only
+
+
+def prune_history(conn: sqlite3.Connection) -> None:
+    conn.execute('DELETE FROM run_items WHERE id NOT IN (SELECT id FROM run_items ORDER BY id DESC LIMIT ?)', (KEEP_LOG_LINES,))
+    conn.execute(
+        'DELETE FROM seen_products WHERE rowid NOT IN (SELECT rowid FROM seen_products ORDER BY created_at DESC, rowid DESC LIMIT ?)',
+        (KEEP_SEEN_PRODUCTS,),
+    )
+    conn.execute(
+        "UPDATE seen_products SET name = NULL, permalink = NULL, image_url = NULL, price = NULL, sale_price = NULL, media_id = NULL "
+        "WHERE name IS NOT NULL AND created_at < datetime('now', ?)",
+        (f'-{KEEP_PRODUCT_DETAIL_DAYS} days',),
+    )
 
 
 def try_create_run(*, kind: str, trigger: str, dry_run: bool, local_date: str) -> int | None:
@@ -174,6 +201,7 @@ def finish_run(run_id: int, status: str, summary: dict[str, Any]) -> None:
             (run_id, run_id, KEEP_RUNS_PER_KIND),
         )
         conn.execute('DELETE FROM run_items WHERE run_id NOT IN (SELECT id FROM runs)')
+        prune_history(conn)
 
 
 def update_run_summary(run_id: int, summary: dict[str, Any]) -> None:
@@ -300,13 +328,58 @@ def record_product(
     image_url: str | None,
     price: str,
     sale_price: str,
+    core_id: str | None = None,
+    title_key: str | None = None,
+    image_key: str | None = None,
+    desc_key: str | None = None,
+    created_at: str | None = None,
 ) -> None:
     with _conn() as conn:
         conn.execute(
             'INSERT OR REPLACE INTO seen_products(source, source_id, wp_product_id, media_id, category_id, name, permalink, '
-            'image_url, price, sale_price, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (source, source_id, wp_product_id, media_id, category_id, name, permalink, image_url, price, sale_price, now_iso()),
+            'image_url, price, sale_price, created_at, core_id, title_key, image_key, desc_key) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (source, source_id, wp_product_id, media_id, category_id, name, permalink, image_url, price, sale_price,
+             created_at or now_iso(), core_id, title_key, image_key, desc_key),
         )
+
+
+def seen_fingerprint_keys(keys: list[str]) -> set[str]:
+    """Which of these 'core:..' / 'title:..' / 'image:..' keys belong to a product we already posted."""
+    wanted: dict[str, list[str]] = {'core': [], 'title': [], 'image': [], 'desc': []}
+    for k in keys:
+        kind, _, v = k.partition(':')
+        if kind in wanted:
+            wanted[kind].append(v)
+    column = {'core': 'core_id', 'title': 'title_key', 'image': 'image_key', 'desc': 'desc_key'}
+    found: set[str] = set()
+    with _conn() as conn:
+        for kind, values in wanted.items():
+            values = list(dict.fromkeys(values))
+            for i in range(0, len(values), 400):
+                chunk = values[i : i + 400]
+                marks = ','.join('?' * len(chunk))
+                for r in conn.execute(f'SELECT DISTINCT {column[kind]} AS v FROM seen_products WHERE {column[kind]} IN ({marks})', chunk):
+                    found.add(f'{kind}:{r["v"]}')
+    return found
+
+
+def fill_keys_for_wp_id(wp_id: int, core_id: str | None, title_key: str | None) -> bool:
+    """True when a row for this WordPress product already exists (missing keys are filled in, e.g. rows saved before
+    the duplicate check existed); False when the product is new to us."""
+    with _conn() as conn:
+        row = conn.execute('SELECT 1 FROM seen_products WHERE wp_product_id = ? LIMIT 1', (wp_id,)).fetchone()
+        if row is None:
+            return False
+        conn.execute(
+            'UPDATE seen_products SET core_id = COALESCE(core_id, ?), title_key = COALESCE(title_key, ?) WHERE wp_product_id = ?',
+            (core_id, title_key, wp_id),
+        )
+        return True
+
+
+def count_wp_seeds() -> int:
+    with _conn() as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM seen_products WHERE source = 'wp'").fetchone()[0])
 
 
 def recent_products(category_ids: list[int], limit: int = 3, days: int = 30) -> list[dict[str, Any]]:
