@@ -71,6 +71,7 @@ async def ask_claude(prompt: str, *, max_tokens: int, temperature: float = 0.3, 
             temperature=temperature,
             system=system,
             response_json=False,
+            disable_thinking=True,  # these are extraction/classification tasks; thinking only adds billed output tokens
         ),
     )
     return str(result['text'])

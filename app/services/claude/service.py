@@ -17,6 +17,7 @@ class ClaudeService:
         temperature: float,
         system: str | None = None,
         response_json: bool = False,
+        disable_thinking: bool = False,
     ) -> dict[str, Any]:
         headers = {
             'x-api-key': api_key,
@@ -46,7 +47,13 @@ class ClaudeService:
                 }
                 if system:
                     payload['system'] = system
+                if disable_thinking:
+                    # Haiku 5.5 thinks by default and bills those tokens as output (about 70% of a review call's output).
+                    payload['thinking'] = {'type': 'disabled'}
                 response = await client.post(cls.base_url, headers=headers, json=payload)
+                if response.status_code == 400 and 'thinking' in response.text and 'thinking' in payload:
+                    payload.pop('thinking', None)  # a model that does not know the parameter: send without it
+                    response = await client.post(cls.base_url, headers=headers, json=payload)
                 if response.status_code == 400 and 'temperature' in response.text:
                     # Newer models reject the temperature parameter; retry the same model without it.
                     payload.pop('temperature', None)

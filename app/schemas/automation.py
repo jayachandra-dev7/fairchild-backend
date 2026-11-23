@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 DEFAULT_IGNORE_KEYWORDS = (
     'gun, rifle, pistol, firearm, ammo, ammunition, shotgun, silencer, switchblade, '
     'vape, e-cigarette, cigar, tobacco, kratom, cbd, weed, '
-    'adult, sex, erotic, lingerie, '
+    'adult toy, sex, erotic, lingerie, '
     'prescription, gift card'
 )
 HARD_MAX_PRICE = 2000.0
