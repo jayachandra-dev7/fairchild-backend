@@ -7,6 +7,7 @@ from app.api.v1.endpoints.cj import router as cj_router
 from app.api.v1.endpoints.impact import router as impact_router
 from app.api.v1.endpoints.metricool import router as metricool_router
 from app.api.v1.endpoints.renderform import router as renderform_router
+from app.api.v1.endpoints.review import router as review_router
 from app.api.v1.endpoints.renderpython import router as renderpython_router
 from app.api.v1.endpoints.wordpress import router as wordpress_router
 
@@ -21,3 +22,4 @@ api_router.include_router(metricool_router.router)
 api_router.include_router(renderform_router.router)
 api_router.include_router(renderpython_router.router)
 api_router.include_router(automation_router.router)
+api_router.include_router(review_router.router)
