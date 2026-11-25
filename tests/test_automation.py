@@ -685,3 +685,11 @@ def test_size_variants_with_new_title_are_the_same_product():
     kept, rejected = filters.filter_and_rank([b], ProductAutomationSettings())
     assert kept == [] and rejected['already posted (same product)'] == 1
     assert len(filters.filter_and_rank([a.model_copy(update={'source_id': '1:10000003'}), b], ProductAutomationSettings())[0]) <= 1
+
+
+def test_blogs_per_day_has_no_upper_cap():
+    from app.schemas.automation import BlogAutomationSettings
+
+    assert BlogAutomationSettings(blogs_per_day=500).blogs_per_day == 500
+    with pytest.raises(ValueError):
+        BlogAutomationSettings(blogs_per_day=0)

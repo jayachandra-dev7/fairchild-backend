@@ -61,7 +61,7 @@ class ProductAutomationSettings(ScheduleSettings):
 
 class BlogAutomationSettings(ScheduleSettings):
     daily_time: str = Field(default='12:00', pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
-    blogs_per_day: int = Field(default=5, ge=1, le=50)
+    blogs_per_day: int = Field(default=5, ge=1)
     min_discount: float = Field(default=0, ge=0, le=95, description='Only feature products discounted at least this much.')
     topic_hint: str = ''
     publish_status: str = Field(default='publish', pattern='^(publish|draft|pending)$')
