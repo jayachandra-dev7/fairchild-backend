@@ -563,6 +563,10 @@ def test_category_resync_is_written_to_the_persistent_folder_not_the_repo(monkey
     categories._cache = None
 
 
+async def _fake_blog_category(kw):
+    return 11
+
+
 def test_custom_blog_generate_and_publish(monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -584,10 +588,12 @@ def test_custom_blog_generate_and_publish(monkeypatch):
     monkeypatch.setattr(WordPressService, 'create_post', staticmethod(fake_create))
     monkeypatch.setattr(blog_job.platform_auth_service, 'get_credentials', lambda _n: {'domain': 'd', 'wc_consumer_key': 'k', 'wc_consumer_secret': 's'})
     client = TestClient(app)
+    blog_job._blog_category_id.clear()
+    monkeypatch.setattr(blog_job, 'blog_category_id', _fake_blog_category)
     r = client.post('/api/v1/automation/blog/custom/generate', json={'prompt': 'gift ideas for runners'})
     assert r.status_code == 200 and r.json()['data']['title'] == 'Gifts for Runners'
     r = client.post('/api/v1/automation/blog/custom/publish', json={'title': 'T', 'content': '<p>x</p>', 'status': 'draft'})
-    assert r.status_code == 200 and r.json()['data']['link'] == 'https://x/p' and seen['payload'].status == 'draft'
+    assert r.status_code == 200 and r.json()['data']['link'] == 'https://x/p' and seen['payload'].status == 'draft' and seen['payload'].categories == [11]
     assert client.post('/api/v1/automation/blog/custom/publish', json={'title': 'T', 'content': 'x', 'status': 'bogus'}).status_code == 422
 
 
@@ -693,3 +699,29 @@ def test_blogs_per_day_has_no_upper_cap():
     assert BlogAutomationSettings(blogs_per_day=500).blogs_per_day == 500
     with pytest.raises(ValueError):
         BlogAutomationSettings(blogs_per_day=0)
+
+
+def test_blog_category_is_found_then_created_and_cached():
+    import httpx
+
+    from app.services.automation import blog_job
+
+    blog_job._blog_category_id.clear()
+    posted = []
+
+    def handler(request):
+        if request.method == 'GET':
+            return httpx.Response(200, json=[])  # no "Blog" category yet
+        posted.append(request.url.path)
+        return httpx.Response(201, json={'id': 77})
+
+    real = httpx.AsyncClient
+    blog_job.httpx.AsyncClient = lambda **kw: real(transport=httpx.MockTransport(handler), **kw)
+    try:
+        kw = {'domain': 'shop.test', 'wc_consumer_key': 'k', 'wc_consumer_secret': 's'}
+        assert asyncio.run(blog_job.blog_category_id(kw)) == 77
+        assert asyncio.run(blog_job.blog_category_id(kw)) == 77  # cached: no second create
+        assert len(posted) == 1
+    finally:
+        blog_job.httpx.AsyncClient = real
+        blog_job._blog_category_id.clear()

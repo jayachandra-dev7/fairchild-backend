@@ -21,6 +21,37 @@ BLOG_SYSTEM = (
 )
 
 
+BLOG_CATEGORY_NAME = 'Blog'
+_blog_category_id: dict[str, int] = {}
+
+
+async def blog_category_id(kw: dict[str, Any]) -> int | None:
+    """Id of the WordPress post category "Blog" (created if missing). Posts sent without a category end up in none,
+    so every automated post is filed here. Returns None when it cannot be resolved, so a post is never lost over it."""
+    key = str(kw['domain'])
+    if key in _blog_category_id:
+        return _blog_category_id[key]
+    base = str(kw['domain']).strip().rstrip('/')
+    if not base.startswith('http'):
+        base = f'https://{base}'
+    auth = (kw['wc_consumer_key'], kw['wc_consumer_secret'])
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            found = await client.get(f'{base}/wp-json/wp/v2/categories', params={'slug': BLOG_CATEGORY_NAME.lower()}, auth=auth)
+            found.raise_for_status()
+            rows = found.json()
+            if rows:
+                cid = int(rows[0]['id'])
+            else:
+                made = await client.post(f'{base}/wp-json/wp/v2/categories', json={'name': BLOG_CATEGORY_NAME}, auth=auth)
+                made.raise_for_status()
+                cid = int(made.json()['id'])
+    except (httpx.HTTPError, KeyError, ValueError):
+        return None
+    _blog_category_id[key] = cid
+    return cid
+
+
 def _discount(p: dict[str, Any]) -> float:
     try:
         price, sale = float(p['price']), float(p['sale_price'])
@@ -102,8 +133,10 @@ async def run_blog_job(run_id: int, cfg: BlogAutomationSettings, *, dry_run: boo
                 continue
             media = next((p['media_id'] for p in products if p.get('media_id')), None)
             kw = {'domain': creds['domain'], 'wc_consumer_key': creds['wc_consumer_key'], 'wc_consumer_secret': creds['wc_consumer_secret']}  # type: ignore[index]
+            cat_id = await blog_category_id(kw)
             payload = WordPressPostCreateRequest(
-                title=title, content=content, status=cfg.publish_status, excerpt=str(data.get('excerpt', '')), featured_media=media
+                title=title, content=content, status=cfg.publish_status, excerpt=str(data.get('excerpt', '')), featured_media=media,
+                categories=[cat_id] if cat_id else [],
             )
             post = await run_with_retry(step='wordpress_post_create', operation=lambda: WordPressService.create_post(**kw, payload=payload))
             automation_store.record_blog(wp_post_id=post.get('id'), category_id=cat['id'], title=title, link=post.get('link'))
@@ -149,7 +182,8 @@ async def publish_custom_blog(*, title: str, content: str, excerpt: str, status:
     if not creds:
         raise RuntimeError('WordPress credentials are not configured.')
     kw = {'domain': creds['domain'], 'wc_consumer_key': creds['wc_consumer_key'], 'wc_consumer_secret': creds['wc_consumer_secret']}
-    payload = WordPressPostCreateRequest(title=title, content=content, status=status, excerpt=excerpt)
+    cat_id = await blog_category_id(kw)
+    payload = WordPressPostCreateRequest(title=title, content=content, status=status, excerpt=excerpt, categories=[cat_id] if cat_id else [])
     post = await run_with_retry(step='wordpress_post_create', operation=lambda: WordPressService.create_post(**kw, payload=payload))
     automation_store.record_blog(wp_post_id=post.get('id'), category_id=None, title=title, link=post.get('link'))
     return {'id': post.get('id'), 'link': post.get('link'), 'status': post.get('status')}
