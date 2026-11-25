@@ -57,7 +57,7 @@ def models() -> list[str]:
     return [m.strip() for m in get_settings().AUTOMATION_CLAUDE_MODELS.split(',') if m.strip()]
 
 
-async def ask_claude(prompt: str, *, max_tokens: int, temperature: float = 0.3, system: str = SYSTEM) -> str:
+async def ask_claude(prompt: str, *, max_tokens: int, temperature: float = 0.3, system: str = SYSTEM, pdf_base64: str | None = None) -> str:
     api_key = get_settings().CLAUDE_API_KEY
     if not api_key:
         raise RuntimeError('CLAUDE_API_KEY is not configured.')
@@ -71,6 +71,7 @@ async def ask_claude(prompt: str, *, max_tokens: int, temperature: float = 0.3, 
             temperature=temperature,
             system=system,
             response_json=False,
+            pdf_base64=pdf_base64,
             disable_thinking=True,  # these are extraction/classification tasks; thinking only adds billed output tokens
         ),
     )

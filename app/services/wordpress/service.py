@@ -134,6 +134,27 @@ class WordPressService:
             return response.json()
 
     @classmethod
+    async def update_post(
+        cls,
+        *,
+        domain: str,
+        wc_consumer_key: str,
+        wc_consumer_secret: str,
+        post_id: int,
+        payload: WordPressPostCreateRequest,
+    ) -> Any:
+        base = cls._normalize_domain(domain)
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f'{base}/wp-json/wp/v2/posts/{post_id}',
+                auth=(wc_consumer_key, wc_consumer_secret),
+                headers={'Content-Type': 'application/json'},
+                json=payload.model_dump(exclude_none=True),
+            )
+            response.raise_for_status()
+            return response.json()
+
+    @classmethod
     async def list_product_categories(
         cls,
         *,

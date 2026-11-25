@@ -18,6 +18,7 @@ class ClaudeService:
         system: str | None = None,
         response_json: bool = False,
         disable_thinking: bool = False,
+        pdf_base64: str | None = None,
     ) -> dict[str, Any]:
         headers = {
             'x-api-key': api_key,
@@ -33,11 +34,22 @@ class ClaudeService:
                 {'role': 'user', 'content': prompt},
                 {'role': 'assistant', 'content': '{'},
             ]
+        elif pdf_base64:
+            # A PDF is sent as a document block ahead of the instructions (Claude reads text and tables natively).
+            messages = [
+                {
+                    'role': 'user',
+                    'content': [
+                        {'type': 'document', 'source': {'type': 'base64', 'media_type': 'application/pdf', 'data': pdf_base64}},
+                        {'type': 'text', 'text': prompt},
+                    ],
+                }
+            ]
         else:
             messages = [{'role': 'user', 'content': prompt}]
 
         last_error = ''
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             for model in model_candidates:
                 payload = {
                     'model': model,

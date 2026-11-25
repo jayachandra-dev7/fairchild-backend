@@ -34,3 +34,7 @@ class WordPressPostCreateRequest(BaseModel):
         default=None,
         description='Optional media ID for the featured image (e.g. the id returned by /wordpress/media/upload).',
     )
+    date_gmt: str | None = Field(
+        default=None,
+        description="Optional publish time in GMT (ISO 8601, e.g. 2026-11-26T14:00:00). With status 'future' WordPress publishes the post at that time.",
+    )

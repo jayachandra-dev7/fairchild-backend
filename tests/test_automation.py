@@ -725,3 +725,158 @@ def test_blog_category_is_found_then_created_and_cached():
     finally:
         blog_job.httpx.AsyncClient = real
         blog_job._blog_category_id.clear()
+
+
+# ---------------------------------------------------------------- content calendar
+from datetime import date as _date, datetime as _dt, timezone as _tz  # noqa: E402
+
+from app.services.automation import calendar_job  # noqa: E402
+
+
+def test_calendar_add_skips_same_title_and_date():
+    rows = [{'title': 'A post', 'keyword': 'k', 'publish_date': '2026-11-26'}]
+    assert automation_store.calendar_add_many('b1', rows) == (1, 0)
+    assert automation_store.calendar_add_many('b2', rows) == (0, 1)  # re-upload of the same plan adds nothing
+    assert automation_store.calendar_add_many('b2', [{'title': 'A post', 'keyword': '', 'publish_date': '2026-11-27'}]) == (1, 0)
+    assert len(automation_store.calendar_list()) == 2
+
+
+def test_spread_dates_weekdays_five_per_week():
+    rows = [{'title': f't{i}', 'publish_date': ''} for i in range(7)]
+    rows[0]['publish_date'] = '2026-12-31'  # Thursday
+    calendar_job.spread_dates(rows, start=None, per_week=5)
+    days = [_date.fromisoformat(r['publish_date']) for r in rows]
+    assert days[1] == _date(2027, 1, 1)  # starts the day after the last dated row
+    assert all(d.weekday() < 5 for d in days)
+    assert len({d.isocalendar()[:2] for d in days[1:]}) >= 2
+
+
+def test_publish_moment_timezone_dst_and_past():
+    now = _dt(2026, 11, 25, 12, 0, tzinfo=_tz.utc)
+    assert calendar_job.publish_moment('2026-11-26', '09:00', 'America/New_York', now=now) == ('future', '2026-11-26T14:00:00')  # EST = UTC-5
+    assert calendar_job.publish_moment('2026-07-01', '09:00', 'America/New_York', now=_dt(2026, 6, 1, tzinfo=_tz.utc)) == ('future', '2026-07-01T13:00:00')  # EDT = UTC-4
+    assert calendar_job.publish_moment('2026-11-25', '09:00', 'America/New_York', now=_dt(2026, 11, 25, 15, 0, tzinfo=_tz.utc)) == ('publish', None)  # already passed
+    with pytest.raises(ValueError):
+        calendar_job.publish_moment('2026-11-26', '09:00', 'Not/AZone', now=now)
+
+
+def test_needs_fact_check_flags_local_topics():
+    assert calendar_job.needs_fact_check({'title': 'Best Christmas Activities for Families in Orlando', 'keyword': ''})
+    assert not calendar_job.needs_fact_check({'title': 'Best Home Organization Products Under $50', 'keyword': 'home organization'})
+
+
+def test_parse_plan_fills_missing_dates_and_dedupes(monkeypatch):
+    async def fake(prompt, **kw):
+        return ('{"guidelines":"800 words","articles":['
+                '{"title":"One","keyword":"k1","publish_date":"2026-11-26"},'
+                '{"title":"one","keyword":"dup","publish_date":null},'
+                '{"title":"Two","keyword":"k2","publish_date":null}]}')
+
+    monkeypatch.setattr(claude_review, 'ask_claude', fake)
+    out = asyncio.run(calendar_job.parse_plan(filename='plan.txt', data=b'x', text=None, start=None, per_week=5))
+    assert [r['title'] for r in out['articles']] == ['One', 'Two']
+    assert out['articles'][1]['publish_date'] == '2026-11-27' and out['guidelines'] == '800 words'
+
+
+def test_generate_one_sets_error_and_keeps_row(monkeypatch):
+    automation_store.calendar_add_many('b', [{'title': 'T', 'keyword': 'k', 'publish_date': '2026-12-01'}])
+    pid = automation_store.calendar_list()[0]['id']
+
+    async def no_products(*a, **k):
+        return []
+
+    async def boom(*a, **k):
+        raise RuntimeError('claude down')
+
+    monkeypatch.setattr(calendar_job, 'find_live_products', no_products)
+    monkeypatch.setattr(claude_review, 'ask_claude', boom)
+    row = asyncio.run(calendar_job.generate_one(pid))
+    assert row['state'] == 'error' and 'claude down' in row['error']
+
+    async def ok(*a, **k):
+        return '{"excerpt":"ex","content":"<p>Hello</p>"}'
+
+    monkeypatch.setattr(claude_review, 'ask_claude', ok)
+    row = asyncio.run(calendar_job.generate_one(pid))
+    assert row['state'] == 'generated' and 'affiliate' in row['content'].lower()  # disclosure appended
+
+
+def test_schedule_one_creates_then_updates_same_post(monkeypatch):
+    automation_store.calendar_add_many('b', [{'title': 'T', 'keyword': 'k', 'publish_date': '2099-12-01'}])
+    pid = automation_store.calendar_list()[0]['id']
+    automation_store.calendar_update(pid, state='approved', content='<p>x</p>', excerpt='e')
+    calls = []
+
+    async def blog_cat(kw):
+        return 7
+
+    async def create(**kw):
+        calls.append(('create', kw['payload']))
+        return {'id': 55, 'link': 'https://x/p'}
+
+    async def update(**kw):
+        calls.append(('update', kw['post_id']))
+        return {'id': kw['post_id'], 'link': 'https://x/p'}
+
+    monkeypatch.setattr(calendar_job, '_wp_kw', lambda: {'domain': 'd', 'wc_consumer_key': 'k', 'wc_consumer_secret': 's'})
+    monkeypatch.setattr(calendar_job.blog_job, 'blog_category_id', blog_cat)
+    monkeypatch.setattr(calendar_job.WordPressService, 'create_post', staticmethod(create))
+    monkeypatch.setattr(calendar_job.WordPressService, 'update_post', staticmethod(update))
+    asyncio.run(calendar_job.schedule_one(pid, '09:00', 'America/New_York'))
+    assert calls[0][0] == 'create' and calls[0][1].status == 'future' and calls[0][1].categories == [7]
+    assert calls[0][1].date_gmt == '2099-12-01T14:00:00'
+    asyncio.run(calendar_job.schedule_one(pid, '10:00', 'America/New_York'))  # re-schedule: no duplicate post
+    assert calls[1] == ('update', 55)
+    assert automation_store.calendar_get(pid)['state'] == 'scheduled'
+
+
+def test_publish_now_and_per_article_time(monkeypatch):
+    automation_store.calendar_add_many('b', [{'title': 'T', 'keyword': 'k', 'publish_date': '2099-12-01'}])
+    pid = automation_store.calendar_list()[0]['id']
+    automation_store.calendar_update(pid, state='generated', content='<p>x</p>', excerpt='e', publish_time='16:30')
+    seen = []
+
+    async def blog_cat(kw):
+        return 7
+
+    async def create(**kw):
+        seen.append(kw['payload'])
+        return {'id': 9, 'link': 'https://x/p'}
+
+    monkeypatch.setattr(calendar_job, '_wp_kw', lambda: {'domain': 'd', 'wc_consumer_key': 'k', 'wc_consumer_secret': 's'})
+    monkeypatch.setattr(calendar_job.blog_job, 'blog_category_id', blog_cat)
+    monkeypatch.setattr(calendar_job.WordPressService, 'create_post', staticmethod(create))
+    with pytest.raises(ValueError):  # a plain schedule still needs approval
+        asyncio.run(calendar_job.schedule_one(pid, '09:00', 'America/New_York'))
+    row = asyncio.run(calendar_job.schedule_one(pid, '09:00', 'America/New_York', now=True))  # publish now needs no approval
+    assert seen[0].status == 'publish' and row['scheduled_for'] == 'now' and row['state'] == 'scheduled'
+    async def update(**kw):
+        seen.append(kw['payload'])
+        return {'id': kw['post_id'], 'link': 'https://x/p'}
+
+    monkeypatch.setattr(calendar_job.WordPressService, 'update_post', staticmethod(update))
+    automation_store.calendar_update(pid, state='approved')
+    asyncio.run(calendar_job.schedule_one(pid, '09:00', 'America/New_York'))
+    # the article's own 16:30 time (EST = 21:30 UTC) wins over the global 09:00
+    assert seen[1].status == 'future' and seen[1].date_gmt == '2099-12-01T21:30:00'
+
+
+def test_parse_plan_passes_editor_instructions(monkeypatch):
+    seen = {}
+
+    async def fake(prompt, **kw):
+        seen['p'] = prompt
+        return '{"guidelines":"","articles":[{"title":"One","keyword":"","publish_date":"2026-12-07"}]}'
+
+    monkeypatch.setattr(claude_review, 'ask_claude', fake)
+    out = asyncio.run(calendar_job.parse_plan(filename='p.txt', data=b'x', text=None, start=None, per_week=5, instructions='Start Dec 7, Mon/Wed/Fri only'))
+    assert 'Start Dec 7, Mon/Wed/Fri only' in seen['p'] and out['articles'][0]['publish_date'] == '2026-12-07'
+
+
+def test_calendar_delete_batch_only_removes_that_plan():
+    automation_store.calendar_add_many('keep', [{'title': 'K', 'keyword': '', 'publish_date': '2026-12-01'}])
+    automation_store.calendar_add_many('drop', [{'title': 'D1', 'keyword': '', 'publish_date': '2026-12-02'}, {'title': 'D2', 'keyword': '', 'publish_date': '2026-12-03'}])
+    automation_store.set_state('calendar_guidelines:drop', 'g')
+    assert automation_store.calendar_delete_batch('drop') == 2
+    assert [r['batch'] for r in automation_store.calendar_list()] == ['keep']
+    assert automation_store.get_state('calendar_guidelines:drop') is None

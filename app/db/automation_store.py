@@ -72,6 +72,23 @@ CREATE TABLE IF NOT EXISTS blog_posts (
     link TEXT,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS calendar_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch TEXT NOT NULL,
+    title TEXT NOT NULL,
+    keyword TEXT NOT NULL DEFAULT '',
+    publish_date TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'planned',
+    excerpt TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    wp_post_id INTEGER,
+    link TEXT,
+    error TEXT,
+    scheduled_for TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(title, publish_date)
+);
 """
 
 
@@ -111,6 +128,9 @@ def _conn() -> Iterator[sqlite3.Connection]:
             for col in ('core_id', 'title_key', 'image_key', 'desc_key'):
                 conn.execute(f'CREATE INDEX IF NOT EXISTS idx_seen_{col} ON seen_products({col})')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_seen_created ON seen_products(created_at)')
+            cal_cols = {r[1] for r in conn.execute('PRAGMA table_info(calendar_posts)')}
+            if 'publish_time' not in cal_cols:  # per-article publish time (empty = use the time chosen when scheduling)
+                conn.execute("ALTER TABLE calendar_posts ADD COLUMN publish_time TEXT NOT NULL DEFAULT ''")
             yield conn
             conn.commit()
         finally:
@@ -420,3 +440,68 @@ def blog_categories_since(days: int = 7) -> set[int]:
             (f'-{days} days',),
         ).fetchall()
     return {r['category_id'] for r in rows}
+
+
+# ---- content calendar (planned posts, reviewed in the app, then scheduled in WordPress) -------------
+CALENDAR_FIELDS = ('title', 'keyword', 'publish_date', 'publish_time', 'state', 'excerpt', 'content', 'wp_post_id', 'link', 'error', 'scheduled_for')
+
+
+def calendar_add_many(batch: str, rows: list[dict[str, Any]]) -> tuple[int, int]:
+    """Insert plan rows; a row with the same title and date is skipped. Returns (added, skipped)."""
+    added = skipped = 0
+    now = now_iso()
+    with _conn() as conn:
+        for r in rows:
+            cur = conn.execute(
+                'INSERT OR IGNORE INTO calendar_posts(batch, title, keyword, publish_date, state, created_at, updated_at) '
+                "VALUES(?, ?, ?, ?, 'planned', ?, ?)",
+                (batch, r['title'].strip(), str(r.get('keyword') or '').strip(), r['publish_date'], now, now),
+            )
+            if cur.rowcount:
+                added += 1
+            else:
+                skipped += 1
+    return added, skipped
+
+
+def calendar_list(batch: str | None = None) -> list[dict[str, Any]]:
+    with _conn() as conn:
+        if batch:
+            rows = conn.execute('SELECT * FROM calendar_posts WHERE batch = ? ORDER BY publish_date, id', (batch,)).fetchall()
+        else:
+            rows = conn.execute('SELECT * FROM calendar_posts ORDER BY publish_date, id').fetchall()
+    return [dict(r) for r in rows]
+
+
+def calendar_get(post_id: int) -> dict[str, Any] | None:
+    with _conn() as conn:
+        row = conn.execute('SELECT * FROM calendar_posts WHERE id = ?', (post_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def calendar_update(post_id: int, **fields: Any) -> dict[str, Any] | None:
+    cols = {k: v for k, v in fields.items() if k in CALENDAR_FIELDS}
+    if cols:
+        sets = ', '.join(f'{k} = ?' for k in cols)
+        with _conn() as conn:
+            conn.execute(f'UPDATE calendar_posts SET {sets}, updated_at = ? WHERE id = ?', (*cols.values(), now_iso(), post_id))
+    return calendar_get(post_id)
+
+
+def calendar_delete(post_id: int) -> None:
+    with _conn() as conn:
+        conn.execute('DELETE FROM calendar_posts WHERE id = ?', (post_id,))
+
+
+def calendar_reset_stuck() -> int:
+    """Rows left in 'generating' by a restart go back to 'planned' so they can be generated again."""
+    with _conn() as conn:
+        return conn.execute("UPDATE calendar_posts SET state = 'planned', updated_at = ? WHERE state = 'generating'", (now_iso(),)).rowcount
+
+
+def calendar_delete_batch(batch: str) -> int:
+    """Remove a whole uploaded plan (its rows and saved guidelines) from the app. WordPress posts are not touched."""
+    with _conn() as conn:
+        n = conn.execute('DELETE FROM calendar_posts WHERE batch = ?', (batch,)).rowcount
+        conn.execute('DELETE FROM state WHERE key = ?', (f'calendar_guidelines:{batch}',))
+    return n
