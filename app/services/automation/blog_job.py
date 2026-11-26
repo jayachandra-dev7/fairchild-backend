@@ -9,14 +9,15 @@ import httpx
 from app.db import automation_store
 from app.schemas.automation import BlogAutomationSettings
 from app.schemas.wordpress.post import WordPressPostCreateRequest
-from app.services.automation import categories, claude_review
+from app.services.automation import categories, claude_review, links
 from app.services.platform_auth_service import platform_auth_service
 from app.services.wordpress.service import WordPressService
 from app.utils.retry import run_with_retry
 
 BLOG_SYSTEM = (
     'You are a helpful shopping editor for a deals website. Write accurate, readable blog posts. Use ONLY the facts '
-    'provided; never invent specs, ratings or claims, and do not promise prices will last. Respond with a single JSON '
+    'provided; never invent specs, ratings or claims, and do not promise prices will last. Never invent or guess URLs: only link '
+    'to the product URLs you are given. Respond with a single JSON '
     'object and nothing else.'
 )
 
@@ -106,6 +107,10 @@ def build_prompt(cat: dict[str, Any], products: list[dict[str, Any]], hint: str)
     )
 
 
+async def _prompt_with_links(cat: dict[str, Any], products: list[dict[str, Any]], hint: str) -> str:
+    return build_prompt(cat, products, hint) + '\n\n' + await links.category_hint(cat['path'], limit=10)
+
+
 async def run_blog_job(run_id: int, cfg: BlogAutomationSettings, *, dry_run: bool) -> tuple[str, dict[str, Any]]:
     creds = platform_auth_service.get_credentials('wordpress')
     if not creds and not dry_run:
@@ -118,8 +123,10 @@ async def run_blog_job(run_id: int, cfg: BlogAutomationSettings, *, dry_run: boo
 
     for cat, products in topics:
         try:
+            dead = await links.dead_urls([p['permalink'] for p in products if p.get('permalink')])
+            products = [p for p in products if p.get('permalink') and p['permalink'] not in dead]  # drafts / deleted products do not load
             data = claude_review.extract_json(
-                await claude_review.ask_claude(build_prompt(cat, products, cfg.topic_hint), max_tokens=4000, temperature=0.6, system=BLOG_SYSTEM)
+                await claude_review.ask_claude(await _prompt_with_links(cat, products, cfg.topic_hint), max_tokens=4000, temperature=0.6, system=BLOG_SYSTEM)
             )
             title, content = str(data.get('title', '')).strip(), str(data.get('content', '')).strip()
             if not title or not content:
@@ -127,6 +134,7 @@ async def run_blog_job(run_id: int, cfg: BlogAutomationSettings, *, dry_run: boo
             for p in products:  # guarantee product links exist even if the model dropped one
                 if p['permalink'] and p['permalink'] not in content:
                     content += f'<p><a href="{p["permalink"]}">{p["name"]}</a></p>'
+            content = await links.clean_html(content, allowed={p['permalink'] for p in products})
             if dry_run:
                 stats['would_publish'] += 1
                 automation_store.add_run_item(run_id, status='dry_run', message=f'Would publish: {title}', category_id=cat['id'], category_name=cat['path'])
@@ -158,14 +166,15 @@ async def run_blog_job(run_id: int, cfg: BlogAutomationSettings, *, dry_run: boo
 
 CUSTOM_SYSTEM = (
     'You are a skilled blog writer for a shopping and deals website. Follow the editor\'s instructions closely. '
-    'Never invent specs, ratings, prices or claims about specific products. Respond with a single JSON object and nothing else.'
+    'Never invent specs, ratings, prices or claims about specific products. Never invent or guess URLs: only use URLs the editor '
+    'or the prompt gives you. Respond with a single JSON object and nothing else.'
 )
 
 
 async def generate_custom_blog(prompt: str) -> dict[str, str]:
     """Claude drafts a post from the editor's prompt. Nothing is published; the editor reviews it first."""
     text = (
-        f'Editor instructions:\n"""\n{prompt.strip()}\n"""\n\n'
+        f'Editor instructions:\n"""\n{prompt.strip()}\n"""\n\n{await links.category_hint(prompt)}\n'
         'Write the blog post as clean HTML (<h2>, <p>, <ul>, <a>; no <html>/<body>, no <h1>, no scripts). '
         'If the instructions give a length, tone or links, follow them; otherwise write 450-650 words. Return exactly:\n'
         '{"title":"SEO-friendly title under 65 characters","excerpt":"1-2 sentence summary, plain text","content":"<p>...</p>"}'
@@ -174,7 +183,7 @@ async def generate_custom_blog(prompt: str) -> dict[str, str]:
     title, content = str(data.get('title', '')).strip(), str(data.get('content', '')).strip()
     if not title or not content:
         raise ValueError('Claude returned an empty title or body. Try rewording the prompt.')
-    return {'title': title, 'excerpt': str(data.get('excerpt', '')).strip(), 'content': content}
+    return {'title': title, 'excerpt': str(data.get('excerpt', '')).strip(), 'content': await links.clean_html(content)}
 
 
 async def publish_custom_blog(*, title: str, content: str, excerpt: str, status: str) -> dict[str, Any]:
@@ -183,6 +192,7 @@ async def publish_custom_blog(*, title: str, content: str, excerpt: str, status:
         raise RuntimeError('WordPress credentials are not configured.')
     kw = {'domain': creds['domain'], 'wc_consumer_key': creds['wc_consumer_key'], 'wc_consumer_secret': creds['wc_consumer_secret']}
     cat_id = await blog_category_id(kw)
+    content = await links.clean_html(content)
     payload = WordPressPostCreateRequest(title=title, content=content, status=status, excerpt=excerpt, categories=[cat_id] if cat_id else [])
     post = await run_with_retry(step='wordpress_post_create', operation=lambda: WordPressService.create_post(**kw, payload=payload))
     automation_store.record_blog(wp_post_id=post.get('id'), category_id=None, title=title, link=post.get('link'))

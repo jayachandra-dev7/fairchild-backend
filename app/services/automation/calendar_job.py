@@ -20,7 +20,7 @@ import httpx
 
 from app.db import automation_store
 from app.schemas.wordpress.post import WordPressPostCreateRequest
-from app.services.automation import blog_job, claude_review
+from app.services.automation import blog_job, claude_review, links
 from app.services.platform_auth_service import platform_auth_service
 from app.services.wordpress.service import WordPressService
 from app.utils.retry import run_with_retry
@@ -42,7 +42,7 @@ PARSE_SYSTEM = (
 )
 ARTICLE_SYSTEM = (
     'You are a skilled SEO editor for a US shopping, deals and lifestyle website. Write original, genuinely useful articles. '
-    'Never invent prices, ratings, specs, venue names, opening hours or event details. Respond with a single JSON object and nothing else.'
+    'Never invent prices, ratings, specs, venue names, opening hours, event details or URLs; use only the URLs you are given. Respond with a single JSON object and nothing else.'
 )
 
 _running = False  # one background generation at a time (the SQLite store is shared)
@@ -222,13 +222,15 @@ async def generate_one(post_id: int) -> dict[str, Any] | None:
     guidelines = automation_store.get_state(f'calendar_guidelines:{row["batch"]}', '') or ''
     try:
         products = await find_live_products(row['keyword'], row['title'])
+        hint = await links.category_hint(f"{row['title']} {row['keyword']}")
         raw = await claude_review.ask_claude(
-            build_article_prompt(row, guidelines, products), max_tokens=6000, temperature=0.7, system=ARTICLE_SYSTEM
+            build_article_prompt(row, guidelines, products) + '\n\n' + hint, max_tokens=6000, temperature=0.7, system=ARTICLE_SYSTEM
         )
         data = claude_review.extract_json(raw)
         content = str(data.get('content') or '').strip()
         if not content:
             raise ValueError('Claude returned an empty article.')
+        content = await links.clean_html(content, allowed={p['permalink'] for p in products if p.get('permalink')})
         if 'affiliate' not in content.lower():
             content += DISCLOSURE
         return automation_store.calendar_update(
@@ -299,8 +301,9 @@ async def schedule_one(post_id: int, hhmm: str, tz_name: str, *, now: bool = Fal
     else:
         wp_status, date_gmt = publish_moment(row['publish_date'], row.get('publish_time') or hhmm, tz_name)
     cat_id = await blog_job.blog_category_id(kw)
+    content = await links.clean_html(row['content'])  # hand edits may have added a bad link
     payload = WordPressPostCreateRequest(
-        title=row['title'], content=row['content'], status=wp_status, excerpt=row['excerpt'],
+        title=row['title'], content=content, status=wp_status, excerpt=row['excerpt'],
         categories=[cat_id] if cat_id else [], date_gmt=date_gmt,
     )
     if row['wp_post_id']:  # already in WordPress: update it so a changed date or edit never creates a duplicate

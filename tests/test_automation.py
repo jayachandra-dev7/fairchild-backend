@@ -9,7 +9,7 @@ from PIL import Image
 from app.core.config import get_settings
 from app.db import automation_store
 from app.schemas.automation import Candidate, ProductAutomationSettings, ScheduleSettings, parse_keywords
-from app.services.automation import categories, claude_review, filters, product_job, sourcing
+from app.services.automation import categories, claude_review, filters, links, product_job, sourcing
 from app.workers.scheduler import is_due
 
 
@@ -19,6 +19,15 @@ def temp_db(tmp_path, monkeypatch):
         return [leaf['name']]
 
     monkeypatch.setattr(claude_review, 'suggest_keywords', plain_keywords)
+
+    async def no_dead(urls):  # never touch the network from tests
+        return set()
+
+    async def no_cats(creds=None):
+        return []
+
+    monkeypatch.setattr(links, 'dead_urls', no_dead)
+    monkeypatch.setattr(links, 'store_categories', no_cats)
     monkeypatch.setattr(automation_store, 'DB_PATH', tmp_path / 'auto.db')
 
 
@@ -880,3 +889,84 @@ def test_calendar_delete_batch_only_removes_that_plan():
     assert automation_store.calendar_delete_batch('drop') == 2
     assert [r['batch'] for r in automation_store.calendar_list()] == ['keep']
     assert automation_store.get_state('calendar_guidelines:drop') is None
+
+
+# ---------------------------------------------------------------- link safety
+CATS = [
+    {'name': 'Dog Toys', 'link': 'https://shop.test/product-category/dog-toys/', 'count': 5},
+    {'name': 'Home Decor', 'link': 'https://shop.test/product-category/home-decor/', 'count': 9},
+]
+CREDS = {'domain': 'shop.test', 'wc_consumer_key': 'k', 'wc_consumer_secret': 's'}
+
+
+def _patch_links(monkeypatch, dead):
+    async def fake_dead(urls):
+        return {u for u in urls if u in dead}
+
+    async def fake_cats(creds=None):
+        return CATS
+
+    monkeypatch.setattr(links, 'dead_urls', fake_dead)
+    monkeypatch.setattr(links, 'store_categories', fake_cats)
+
+
+def test_sanitize_replaces_dead_link_with_closest_category(monkeypatch):
+    _patch_links(monkeypatch, {'https://shop.test/best-dog-toys/'})
+    html = '<p>See <a href="/best-dog-toys/">our dog toys</a> and <a href="https://ok.test/x">fine</a>.</p>'
+    out, changes = asyncio.run(links.sanitize_links(html, creds=CREDS))
+    assert 'href="https://shop.test/product-category/dog-toys/"' in out and 'href="https://ok.test/x"' in out
+    assert changes[0]['replacement'].endswith('/dog-toys/')
+    assert asyncio.run(links.sanitize_links(out, creds=CREDS))[1] == []  # second pass changes nothing
+
+
+def test_sanitize_unwraps_when_no_category_matches_and_keeps_allowed_and_mailto(monkeypatch):
+    _patch_links(monkeypatch, {'https://shop.test/zzz/', 'https://shop.test/p/1/'})
+    html = '<a href="/zzz/">mystery</a> <a href="https://shop.test/p/1/">Allowed</a> <a href="mailto:a@b.c">mail</a>'
+    out, _ = asyncio.run(links.sanitize_links(html, creds=CREDS, allowed={'https://shop.test/p/1/'}))
+    assert out.startswith('mystery ') and 'href="https://shop.test/p/1/"' in out and 'mailto:a@b.c' in out
+
+
+def test_is_dead_only_for_404_410_and_unreachable():
+    import httpx
+
+    def handler(request):
+        code = {'/gone': 404, '/old': 410, '/blocked': 403, '/ok': 200}.get(request.url.path, 200)
+        return httpx.Response(code)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return [await links._is_dead(c, f'https://x.test{p}') for p in ('/gone', '/old', '/blocked', '/ok')]
+
+    assert asyncio.run(run()) == [True, True, False, False]
+
+
+def test_category_hint_lists_real_urls(monkeypatch):
+    _patch_links(monkeypatch, set())
+    hint = asyncio.run(links.category_hint('dog toys guide'))
+    assert 'never invent' in hint and hint.index('Dog Toys') < hint.index('Home Decor')
+
+
+def test_daily_blog_drops_dead_product_permalink(monkeypatch):
+    from app.schemas.automation import BlogAutomationSettings
+    from app.services.automation import blog_job
+
+    cat = {'id': 1, 'path': 'Pets > Dog Toys', 'name': 'Dog Toys'}
+    prods = [
+        {'name': 'Live Toy', 'price': '10', 'sale_price': '5', 'permalink': 'https://shop.test/live/', 'media_id': None},
+        {'name': 'Draft Toy', 'price': '10', 'sale_price': '5', 'permalink': 'https://shop.test/?p=9', 'media_id': None},
+    ]
+    seen = {}
+
+    async def fake_dead(urls):
+        return {u for u in urls if '?p=9' in u}
+
+    async def fake_ask(prompt, **kw):
+        seen['prompt'] = prompt
+        return '{"title":"T","excerpt":"e","content":"<p>x</p>"}'
+
+    monkeypatch.setattr(links, 'dead_urls', fake_dead)
+    monkeypatch.setattr(blog_job, 'pick_topics', lambda cfg: [(cat, prods)])
+    monkeypatch.setattr(claude_review, 'ask_claude', fake_ask)
+    run_id = automation_store.create_run(kind='blog', trigger='manual', dry_run=True, local_date='2026-01-01')
+    asyncio.run(blog_job.run_blog_job(run_id, BlogAutomationSettings(), dry_run=True))
+    assert 'Live Toy' in seen['prompt'] and 'Draft Toy' not in seen['prompt']
