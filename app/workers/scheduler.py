@@ -65,7 +65,7 @@ async def tick() -> None:
     try:
         automation_store.mark_stale_runs_interrupted(automation_store.STALE_AFTER_SECONDS)  # runs whose process died
         settings = config_store.load_all()
-        for kind, cfg in (('product', settings.product), ('blog', settings.blog)):
+        for kind, cfg in (('product', settings.product), ('blog', settings.blog), ('guide', config_store.load_guide())):
             now = runner.local_now(cfg.timezone)
             attempts = slot_attempts(kind, cfg, now)
             if is_due(cfg, now, attempts):

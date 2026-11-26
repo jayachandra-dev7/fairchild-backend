@@ -970,3 +970,88 @@ def test_daily_blog_drops_dead_product_permalink(monkeypatch):
     run_id = automation_store.create_run(kind='blog', trigger='manual', dry_run=True, local_date='2026-01-01')
     asyncio.run(blog_job.run_blog_job(run_id, BlogAutomationSettings(), dry_run=True))
     assert 'Live Toy' in seen['prompt'] and 'Draft Toy' not in seen['prompt']
+
+
+# ---------------------------------------------------------------- category guides
+from app.schemas.automation import GuideAutomationSettings  # noqa: E402
+from app.services.automation import guide_job  # noqa: E402
+
+LEAF = {'id': 3, 'name': 'Cat Food', 'path': 'Animals & Pet Supplies > Cat Supplies > Cat Food', 'depth': 3, 'is_leaf': True}
+
+
+def _cands(n):
+    return [cand(source_id=f'p{i}', title=f'Cat Food Brand {i}', buy_url=f'https://aff.test/{i}', image_url=f'https://img.test/{i}.jpg', price=20.0 + i, sale_price=10.0 + i, discount=40.0) for i in range(n)]
+
+
+def _patch_guides(monkeypatch, n_products=5, wp_desc=''):
+    sent = {}
+
+    async def fetch(leaf, cfg, page=0, *, state=None, keyword=None):
+        return (_cands(n_products), []) if not (state or {}).get('used') and not (state.update(used=True)) else ([], [])
+
+    async def ask(prompt, **kw):
+        sent['prompt'] = prompt
+        return '{"excerpt":"ex","content":"<h2>Pick</h2><p>Hi <a href=\\"https://aff.test/0\\">Cat Food Brand 0</a></p>"}'
+
+    async def get_cat(**kw):
+        return {'id': kw['category_id'], 'description': wp_desc}
+
+    async def put_cat(**kw):
+        sent['put'] = kw
+        return {'id': kw['category_id']}
+
+    monkeypatch.setattr(guide_job.sourcing, 'fetch_candidates', fetch)
+    monkeypatch.setattr(claude_review, 'ask_claude', ask)
+    monkeypatch.setattr(categories, 'category_by_id', lambda cid: LEAF if cid == 3 else None)
+    monkeypatch.setattr(guide_job, '_wp_kw', lambda: {'domain': 'd', 'wc_consumer_key': 'k', 'wc_consumer_secret': 's'})
+    monkeypatch.setattr(guide_job.WordPressService, 'get_category', staticmethod(get_cat))
+    monkeypatch.setattr(guide_job.WordPressService, 'update_category', staticmethod(put_cat))
+    return sent
+
+
+def test_guide_skipped_when_too_few_products(monkeypatch):
+    _patch_guides(monkeypatch, n_products=2)
+    row = asyncio.run(guide_job.generate_guide(3, GuideAutomationSettings()))
+    assert row['state'] == 'skipped' and row['content'] == '' and 'Not enough' in row['error']
+
+
+def test_guide_generated_with_only_supplied_links_and_disclosure(monkeypatch):
+    sent = _patch_guides(monkeypatch, n_products=5)
+    row = asyncio.run(guide_job.generate_guide(3, GuideAutomationSettings()))
+    assert row['state'] == 'generated' and row['product_count'] == 5
+    assert 'gpc-category-guide' in row['content'] and 'affiliate' in row['content'].lower()
+    assert 'rel="sponsored nofollow noopener"' in row['content']  # affiliate link marked
+    assert 'https://aff.test/1' in sent['prompt'] and 'Price range' in sent['prompt']
+
+
+def test_publish_guide_writes_description_and_clears_content(monkeypatch):
+    sent = _patch_guides(monkeypatch)
+    asyncio.run(guide_job.generate_guide(3, GuideAutomationSettings()))
+    row = asyncio.run(guide_job.publish_guide(3))
+    assert row['state'] == 'published' and row['content'] == '' and sent['put']['category_id'] == 3
+    assert 'gpc-category-guide' in sent['put']['description']
+
+
+def test_publish_guide_never_overwrites_hand_written_description(monkeypatch):
+    sent = _patch_guides(monkeypatch, wp_desc='<p>Our own text</p>')
+    asyncio.run(guide_job.generate_guide(3, GuideAutomationSettings()))
+    row = asyncio.run(guide_job.publish_guide(3))
+    assert row['state'] == 'skipped' and 'put' not in sent
+
+
+def test_daily_run_publishes_only_approved_up_to_limit(monkeypatch):
+    sent = _patch_guides(monkeypatch)
+    for cid in (3, 4, 5):
+        automation_store.guide_upsert(cid, f'P{cid}', state='approved', content='<div class="gpc-category-guide">x</div>')
+    automation_store.guide_upsert(6, 'P6', state='generated', content='x')  # drafted but not approved: never published
+    published = []
+
+    async def fake_publish(cid):
+        published.append(cid)
+        return automation_store.guide_upsert(cid, f'P{cid}', state='published', content='')
+
+    monkeypatch.setattr(guide_job, 'publish_guide', fake_publish)
+    run_id = automation_store.create_run(kind='guide', trigger='manual', dry_run=False, local_date='2026-01-01')
+    status, stats = asyncio.run(guide_job.run_guide_job(run_id, GuideAutomationSettings(guides_per_day=2), dry_run=False))
+    assert len(published) == 2 and 6 not in published and stats['published'] == 2 and status == 'completed'
+    assert automation_store.guide_get(6)['state'] == 'generated'

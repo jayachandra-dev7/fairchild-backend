@@ -8,7 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.db import automation_store
-from app.services.automation import blog_job, config_store, product_job
+from app.services.automation import blog_job, config_store, guide_job, product_job
 
 logger = logging.getLogger(__name__)
 _tasks: set[asyncio.Task] = set()
@@ -18,6 +18,10 @@ _run_tasks: dict[int, asyncio.Task] = {}
 
 class RunAlreadyActive(RuntimeError):
     pass
+
+
+def _settings_for(kind: str, cfg: Any) -> Any:
+    return cfg.product if kind == 'product' else config_store.load_guide() if kind == 'guide' else cfg.blog
 
 
 def local_now(tz_name: str) -> datetime:
@@ -34,6 +38,8 @@ async def _execute(run_id: int, kind: str, dry_run: bool, max_categories: int | 
             status, summary = await product_job.run_product_job(
                 run_id, cfg.product, dry_run=dry_run, max_categories=max_categories, category_ids=category_ids
             )
+        elif kind == 'guide':
+            status, summary = await guide_job.run_guide_job(run_id, config_store.load_guide(), dry_run=dry_run)
         else:
             status, summary = await blog_job.run_blog_job(run_id, cfg.blog, dry_run=dry_run)
         automation_store.finish_run(run_id, status, summary)
@@ -60,13 +66,13 @@ def start_run(
     max_categories: int | None = None,
     category_ids: list[int] | None = None,
 ) -> int:
-    if kind not in ('product', 'blog'):
-        raise ValueError('kind must be product or blog')
+    if kind not in ('product', 'blog', 'guide'):
+        raise ValueError('kind must be product, blog or guide')
     if kind in _running:
         raise RunAlreadyActive(f'A {kind} run is already in progress.')
     loop = asyncio.get_running_loop()  # raises if called off the event loop - before any state is touched
     cfg = config_store.load_all()
-    tz = (cfg.product if kind == 'product' else cfg.blog).timezone
+    tz = _settings_for(kind, cfg).timezone
     run_id = automation_store.try_create_run(kind=kind, trigger=trigger, dry_run=dry_run, local_date=local_now(tz).date().isoformat())
     if run_id is None:
         raise RunAlreadyActive(f'A {kind} run is already in progress.')
@@ -104,7 +110,7 @@ def next_run_info(kind: str) -> dict[str, Any]:
     from app.workers import scheduler
 
     cfg = config_store.load_all()
-    s = cfg.product if kind == 'product' else cfg.blog
+    s = _settings_for(kind, cfg)
     now = local_now(s.timezone)
     attempts = scheduler.slot_attempts(kind, s, now)
     done = scheduler.is_done(attempts)

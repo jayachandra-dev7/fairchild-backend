@@ -67,6 +67,20 @@ class BlogAutomationSettings(ScheduleSettings):
     publish_status: str = Field(default='publish', pattern='^(publish|draft|pending)$')
 
 
+class GuideAutomationSettings(ScheduleSettings):
+    """Daily category-guide drip. Stored separately from the product/blog settings (its own endpoint)."""
+
+    daily_time: str = Field(default='14:00', pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
+    guides_per_day: int = Field(default=25, ge=1, le=500)
+    auto_publish: bool = False  # False: the daily run only publishes guides you approved. True: it also drafts new ones and publishes them.
+    use_cj: bool = True
+    use_impact: bool = True
+    cj_advertiser_ids: list[str] = Field(default_factory=list, description='Department stores to draw products from. Empty = every joined advertiser.')
+    impact_campaign_ids: list[str] = Field(default_factory=list)
+    min_price: float = Field(default=5, ge=0)
+    max_price: float = Field(default=500, ge=0, le=HARD_MAX_PRICE)
+
+
 class AutomationSettings(BaseModel):
     product: ProductAutomationSettings = Field(default_factory=ProductAutomationSettings)
     blog: BlogAutomationSettings = Field(default_factory=BlogAutomationSettings)

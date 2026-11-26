@@ -11,9 +11,9 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query
 
 from app.core.config import get_settings
 from app.db import automation_store
-from app.schemas.automation import AutomationSettings, RunRequest
+from app.schemas.automation import AutomationSettings, GuideAutomationSettings, RunRequest
 from app.schemas.common import ApiResponse, ErrorDetail
-from app.services.automation import blog_job, calendar_job, categories, config_store, sources
+from app.services.automation import blog_job, calendar_job, categories, config_store, guide_job, sources
 from app.workers import runner
 
 
@@ -47,6 +47,7 @@ def automation_status() -> ApiResponse[dict]:
         data={
             'product': runner.next_run_info('product'),
             'blog': runner.next_run_info('blog'),
+            'guide': runner.next_run_info('guide'),
             'categories': snapshot_info,
             'product_cursor': cursor,
             'scheduler_enabled': True,
@@ -298,8 +299,110 @@ async def calendar_schedule(body: CalendarSchedule) -> ApiResponse[dict]:
     return ApiResponse(data={'scheduled': done, 'published_now': immediate, 'failed': failed})
 
 
+# ---------------------------------------------------------------- category guides
+class GuideIds(BaseModel):
+    ids: list[int] | None = None
+    count: int = Field(default=20, ge=1, le=200)  # used when ids is omitted: the next N categories without a guide
+
+
+class GuideEdit(BaseModel):
+    excerpt: str | None = None
+    content: str | None = None
+    state: str | None = Field(default=None, pattern='^(generated|approved)$')
+
+
+class GuideApprove(BaseModel):
+    ids: list[int] | None = None
+    first_n: int | None = Field(default=None, ge=1, le=500)
+
+
+@router.get('/guides/settings', response_model=ApiResponse[GuideAutomationSettings])
+def get_guide_settings() -> ApiResponse[GuideAutomationSettings]:
+    return ApiResponse(data=config_store.load_guide())
+
+
+@router.put('/guides/settings', response_model=ApiResponse[GuideAutomationSettings])
+def put_guide_settings(body: GuideAutomationSettings) -> ApiResponse[GuideAutomationSettings]:
+    return ApiResponse(data=config_store.save_guide(body))
+
+
+@router.get('/guides', response_model=ApiResponse[dict])
+def guides_list(state: str | None = None, q: str | None = None, limit: int = Query(default=50, ge=1, le=200), offset: int = Query(default=0, ge=0)) -> ApiResponse[dict]:
+    if not guide_job.is_busy():
+        automation_store.guide_reset_stuck()
+    try:
+        leaf_total = len([c for c in categories.leaf_categories()])
+    except FileNotFoundError:
+        leaf_total = 0
+    return ApiResponse(data={
+        'items': automation_store.guide_list(state, q, limit, offset),
+        'counts': automation_store.guide_counts(),
+        'leaf_total': leaf_total,
+        'busy': guide_job.is_busy(),
+    })
+
+
+@router.get('/guides/{category_id}', response_model=ApiResponse[dict])
+def guide_get(category_id: int) -> ApiResponse[dict]:
+    row = automation_store.guide_get(category_id)
+    if not row:
+        raise _err('GUIDE_NOT_FOUND', 'Guide not found.', 404)
+    return ApiResponse(data=row)
+
+
+@router.post('/guides/generate', response_model=ApiResponse[dict])
+async def guides_generate(body: GuideIds) -> ApiResponse[dict]:
+    """Draft guides in the background: the given categories, or the next N that have none yet."""
+    try:
+        ids = body.ids if body.ids is not None else [c['id'] for c in await guide_job.pending_categories(body.count)]
+        queued = await guide_job.start_drafting(ids, config_store.load_guide())
+    except RuntimeError as exc:
+        raise _err('GUIDE_BUSY', str(exc), 409) from exc
+    except FileNotFoundError as exc:
+        raise _err('CATEGORY_SNAPSHOT_MISSING', str(exc), 409) from exc
+    return ApiResponse(data={'queued': queued})
+
+
+@router.patch('/guides/{category_id}', response_model=ApiResponse[dict])
+def guide_edit(category_id: int, body: GuideEdit) -> ApiResponse[dict]:
+    row = automation_store.guide_get(category_id)
+    if not row:
+        raise _err('GUIDE_NOT_FOUND', 'Guide not found.', 404)
+    fields = body.model_dump(exclude_none=True)
+    if not (fields.get('content') or row['content']):
+        fields.pop('state', None)  # nothing to approve yet
+    return ApiResponse(data=automation_store.guide_upsert(category_id, row['path'], **fields))
+
+
+@router.post('/guides/approve', response_model=ApiResponse[dict])
+def guides_approve(body: GuideApprove) -> ApiResponse[dict]:
+    ids = body.ids if body.ids is not None else automation_store.guide_ids_in_state('generated', body.first_n or 500)
+    n = 0
+    for cid in ids:
+        row = automation_store.guide_get(cid)
+        if row and row['state'] == 'generated':
+            automation_store.guide_upsert(cid, row['path'], state='approved')
+            n += 1
+    return ApiResponse(data={'approved': n})
+
+
+@router.post('/guides/{category_id}/publish-now', response_model=ApiResponse[dict])
+async def guide_publish_now(category_id: int) -> ApiResponse[dict]:
+    try:
+        return ApiResponse(data=await guide_job.publish_guide(category_id))
+    except ValueError as exc:
+        raise _err('GUIDE_PUBLISH_FAILED', str(exc), 422) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _err('GUIDE_PUBLISH_FAILED', _upstream(exc), 502) from exc
+
+
+@router.post('/guide/run', response_model=ApiResponse[dict])
+async def run_guides(body: RunRequest) -> ApiResponse[dict]:
+    return _start('guide', body)
+
+
 @router.get('/runs', response_model=ApiResponse[list])
-def list_runs(kind: str | None = Query(default=None, pattern='^(product|blog)$'), limit: int = Query(default=20, ge=1, le=100)) -> ApiResponse[list]:
+def list_runs(kind: str | None = Query(default=None, pattern='^(product|blog|guide)$'), limit: int = Query(default=20, ge=1, le=100)) -> ApiResponse[list]:
     return ApiResponse(data=automation_store.list_runs(kind, limit))
 
 

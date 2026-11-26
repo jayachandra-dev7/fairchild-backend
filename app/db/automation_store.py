@@ -72,6 +72,20 @@ CREATE TABLE IF NOT EXISTS blog_posts (
     link TEXT,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS category_guides (
+    category_id INTEGER PRIMARY KEY,
+    path TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'queued',
+    excerpt TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    product_count INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    link TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    published_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_guides_state ON category_guides(state);
 CREATE TABLE IF NOT EXISTS calendar_posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch TEXT NOT NULL,
@@ -505,3 +519,68 @@ def calendar_delete_batch(batch: str) -> int:
         n = conn.execute('DELETE FROM calendar_posts WHERE batch = ?', (batch,)).rowcount
         conn.execute('DELETE FROM state WHERE key = ?', (f'calendar_guidelines:{batch}',))
     return n
+
+
+# ---- category guides (one shopping guide per end-point category, written into the WooCommerce category description) --
+GUIDE_FIELDS = ('state', 'excerpt', 'content', 'product_count', 'error', 'link', 'published_at')
+
+
+def guide_upsert(category_id: int, path: str, **fields: Any) -> dict[str, Any]:
+    cols = {k: v for k, v in fields.items() if k in GUIDE_FIELDS}
+    now = now_iso()
+    with _conn() as conn:
+        if conn.execute('SELECT 1 FROM category_guides WHERE category_id = ?', (category_id,)).fetchone():
+            if cols:
+                sets = ', '.join(f'{k} = ?' for k in cols)
+                conn.execute(f'UPDATE category_guides SET {sets}, path = ?, updated_at = ? WHERE category_id = ?', (*cols.values(), path, now, category_id))
+        else:
+            data = {'state': 'queued', **cols}
+            names = ', '.join(data)
+            conn.execute(
+                f'INSERT INTO category_guides(category_id, path, {names}, created_at, updated_at) VALUES(?, ?, {", ".join("?" * len(data))}, ?, ?)',
+                (category_id, path, *data.values(), now, now),
+            )
+    return guide_get(category_id) or {}
+
+
+def guide_get(category_id: int) -> dict[str, Any] | None:
+    with _conn() as conn:
+        row = conn.execute('SELECT * FROM category_guides WHERE category_id = ?', (category_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def guide_ids() -> set[int]:
+    with _conn() as conn:
+        return {r[0] for r in conn.execute('SELECT category_id FROM category_guides')}
+
+
+def guide_list(state: str | None = None, q: str | None = None, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    where, args = [], []
+    if state:
+        where.append('state = ?')
+        args.append(state)
+    if q:
+        where.append('path LIKE ?')
+        args.append(f'%{q}%')
+    sql = 'SELECT category_id, path, state, excerpt, product_count, error, link, updated_at, published_at, length(content) > 0 AS has_content FROM category_guides'
+    if where:
+        sql += ' WHERE ' + ' AND '.join(where)
+    sql += ' ORDER BY updated_at DESC LIMIT ? OFFSET ?'
+    with _conn() as conn:
+        rows = conn.execute(sql, (*args, limit, offset)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def guide_counts() -> dict[str, int]:
+    with _conn() as conn:
+        return {r['state']: r['n'] for r in conn.execute('SELECT state, COUNT(*) AS n FROM category_guides GROUP BY state')}
+
+
+def guide_ids_in_state(state: str, limit: int) -> list[int]:
+    with _conn() as conn:
+        return [r[0] for r in conn.execute('SELECT category_id FROM category_guides WHERE state = ? ORDER BY updated_at LIMIT ?', (state, limit))]
+
+
+def guide_reset_stuck() -> int:
+    with _conn() as conn:
+        return conn.execute("UPDATE category_guides SET state = 'queued', updated_at = ? WHERE state = 'generating'", (now_iso(),)).rowcount

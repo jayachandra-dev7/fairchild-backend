@@ -55,7 +55,7 @@ async def store_categories(creds: dict[str, Any] | None = None) -> list[dict[str
                 if resp.status_code >= 400:
                     break
                 rows = resp.json()
-                cats += [{'name': re.sub('&amp;', '&', str(r.get('name') or '')), 'link': str(r['link']), 'count': int(r.get('count') or 0)} for r in rows if r.get('link')]
+                cats += [{'id': int(r['id']), 'name': re.sub('&amp;', '&', str(r.get('name') or '')), 'link': str(r['link']), 'count': int(r.get('count') or 0)} for r in rows if r.get('link')]
                 if len(rows) < 100:
                     break
             if not cats:  # product_cat not exposed over REST: build the standard WooCommerce URL from the slug
@@ -64,7 +64,7 @@ async def store_categories(creds: dict[str, Any] | None = None) -> list[dict[str
                     if resp.status_code >= 400:
                         break
                     rows = resp.json()
-                    cats += [{'name': str(r.get('name') or ''), 'link': f'{base}/product-category/{r["slug"]}/', 'count': int(r.get('count') or 0)} for r in rows if r.get('slug')]
+                    cats += [{'id': int(r['id']), 'name': str(r.get('name') or ''), 'link': f'{base}/product-category/{r["slug"]}/', 'count': int(r.get('count') or 0)} for r in rows if r.get('slug')]
                     if len(rows) < 100:
                         break
     except (httpx.HTTPError, ValueError, KeyError):
